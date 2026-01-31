@@ -1,8 +1,9 @@
 import express from 'express';
 import swiftDaemon from '../services/swift-daemon.js';
-import { authenticateToken } from '../middleware/auth.js';
+import { optionalAuthenticateToken } from '../middleware/auth.js';
 import logger from '../config/logger.js';
-import SocketManager from '../services/socket-manager.js';
+import { sendSuccess, sendError } from '../utils/envelope.js';
+import { toClientTimestamp } from '../utils/dates.js';
 
 const router = express.Router();
 
@@ -10,10 +11,11 @@ const router = express.Router();
  * GET /api/v1/chats/:chatGuid/messages
  * Get messages for a specific chat
  */
-router.get('/api/v1/chats/:chatGuid/messages', authenticateToken, async (req, res) => {
+router.get('/api/v1/chats/:chatGuid/messages', optionalAuthenticateToken, async (req, res) => {
   try {
     const { chatGuid } = req.params;
     const { limit = 50, before } = req.query;
+    const offset = req.query?.offset ? parseInt(req.query.offset) : 0;
 
     const messages = await swiftDaemon.getMessages(
       chatGuid,
@@ -21,15 +23,15 @@ router.get('/api/v1/chats/:chatGuid/messages', authenticateToken, async (req, re
       before ? parseInt(before) : null
     );
 
-    // Transform Swift format → BlueBubbles Message format
+    // Transform Swift format → BlueBubbles Message format (dates: Apple ns → ms since epoch)
     const formattedMessages = messages.map(msg => ({
       guid: msg.guid,
       text: msg.text || null,
       chatGuid: chatGuid,
       sender: msg.sender || 'Unknown',
       handleId: msg.handleId || '',
-      dateCreated: msg.dateCreated || Date.now(),
-      dateRead: msg.dateRead || null,
+      dateCreated: toClientTimestamp(msg.dateCreated) ?? Date.now(),
+      dateRead: toClientTimestamp(msg.dateRead) ?? null,
       isFromMe: msg.isFromMe || false,
       attachments: msg.attachments || [],
       subject: msg.subject || null,
@@ -41,16 +43,60 @@ router.get('/api/v1/chats/:chatGuid/messages', authenticateToken, async (req, re
 
     logger.debug(`Returning ${formattedMessages.length} messages for chat ${chatGuid}`);
     
-    res.json({
-      success: true,
-      data: formattedMessages
+    sendSuccess(res, formattedMessages, 'Success', 200, {
+      offset,
+      limit: parseInt(limit),
+      total: formattedMessages.length,
+      count: formattedMessages.length
     });
   } catch (error) {
     logger.error(`Get messages error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      error: error.message
+    sendError(res, 500, error.message);
+  }
+});
+
+/**
+ * GET /api/v1/chat/:chatGuid/message
+ * BlueBubbles-compatible message list
+ */
+router.get('/api/v1/chat/:chatGuid/message', optionalAuthenticateToken, async (req, res) => {
+  try {
+    const { chatGuid } = req.params;
+    const { limit = 50, before } = req.query;
+    const offset = req.query?.offset ? parseInt(req.query.offset) : 0;
+
+    const messages = await swiftDaemon.getMessages(
+      chatGuid,
+      parseInt(limit),
+      before ? parseInt(before) : null
+    );
+
+    const formattedMessages = messages.map(msg => ({
+      guid: msg.guid,
+      text: msg.text || null,
+      chatGuid: chatGuid,
+      sender: msg.sender || 'Unknown',
+      handleId: msg.handleId || '',
+      dateCreated: toClientTimestamp(msg.dateCreated) ?? Date.now(),
+      dateRead: toClientTimestamp(msg.dateRead) ?? null,
+      isFromMe: msg.isFromMe || false,
+      attachments: msg.attachments || [],
+      subject: msg.subject || null,
+      type: msg.type || 'text',
+      error: msg.error || null,
+      associatedMessageGuid: msg.associatedMessageGuid || null,
+      associatedMessageType: msg.associatedMessageType || null
+    }));
+
+    sendSuccess(res, formattedMessages, 'Success', 200, {
+      offset,
+      limit: parseInt(limit),
+      total: formattedMessages.length,
+      count: formattedMessages.length
     });
+  } catch (error) {
+    logger.error(`Get chat messages error: ${error.message}`);
+    sendError(res, 500, error.message);
   }
 });
 
@@ -59,15 +105,12 @@ router.get('/api/v1/chats/:chatGuid/messages', authenticateToken, async (req, re
  * Send text message
  * Body: { chatGuid, tempGuid, text, method, subject, effectId }
  */
-router.post('/api/v1/message/text', authenticateToken, async (req, res) => {
+router.post('/api/v1/message/text', optionalAuthenticateToken, async (req, res) => {
   try {
     const { chatGuid, tempGuid, text, method = 'apple-script', subject, effectId } = req.body;
 
     if (!chatGuid || !tempGuid || !text) {
-      return res.status(400).json({
-        success: false,
-        error: 'chatGuid, tempGuid, and text are required'
-      });
+      return sendError(res, 400, 'chatGuid, tempGuid, and text are required', 'Bad Request');
     }
 
     // Forward to Swift daemon
@@ -93,19 +136,13 @@ router.post('/api/v1/message/text', authenticateToken, async (req, res) => {
 
     logger.info(`Message sent to chat ${chatGuid}: ${text.substring(0, 30)}...`);
 
-    res.json({
-      success: true,
-      data: {
-        guid: messagePayload.guid,
-        chatGuid: chatGuid
-      }
+    sendSuccess(res, {
+      guid: messagePayload.guid,
+      chatGuid: chatGuid
     });
   } catch (error) {
     logger.error(`Send message error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    sendError(res, 500, error.message);
   }
 });
 
@@ -114,15 +151,12 @@ router.post('/api/v1/message/text', authenticateToken, async (req, res) => {
  * Send typing indicator
  * Body: { chatGuid, isTyping }
  */
-router.post('/api/v1/typing-indicator', authenticateToken, async (req, res) => {
+router.post('/api/v1/typing-indicator', optionalAuthenticateToken, async (req, res) => {
   try {
     const { chatGuid, isTyping } = req.body;
 
     if (!chatGuid) {
-      return res.status(400).json({
-        success: false,
-        error: 'chatGuid is required'
-      });
+      return sendError(res, 400, 'chatGuid is required', 'Bad Request');
     }
 
     const eventName = isTyping ? 'typing.indicator.started' : 'typing.indicator.stopped';
@@ -141,15 +175,10 @@ router.post('/api/v1/typing-indicator', authenticateToken, async (req, res) => {
 
     logger.debug(`Typing indicator ${isTyping ? 'started' : 'stopped'} for chat ${chatGuid}`);
 
-    res.json({
-      success: true
-    });
+    sendSuccess(res, true);
   } catch (error) {
     logger.error(`Typing indicator error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    sendError(res, 500, error.message);
   }
 });
 
@@ -158,15 +187,12 @@ router.post('/api/v1/typing-indicator', authenticateToken, async (req, res) => {
  * Send read receipt
  * Body: { chatGuid, messageGuids }
  */
-router.post('/api/v1/read_receipt', authenticateToken, async (req, res) => {
+router.post('/api/v1/read_receipt', optionalAuthenticateToken, async (req, res) => {
   try {
     const { chatGuid, messageGuids } = req.body;
 
     if (!chatGuid || !messageGuids || !Array.isArray(messageGuids)) {
-      return res.status(400).json({
-        success: false,
-        error: 'chatGuid and messageGuids (array) are required'
-      });
+      return sendError(res, 400, 'chatGuid and messageGuids (array) are required', 'Bad Request');
     }
 
     // Emit read receipt event
@@ -180,16 +206,18 @@ router.post('/api/v1/read_receipt', authenticateToken, async (req, res) => {
 
     logger.debug(`Read receipt sent for ${messageGuids.length} messages in chat ${chatGuid}`);
 
-    res.json({
-      success: true
-    });
+    sendSuccess(res, true);
   } catch (error) {
     logger.error(`Read receipt error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    sendError(res, 500, error.message);
   }
+});
+
+/**
+ * GET /api/v1/message/count
+ */
+router.get('/api/v1/message/count', optionalAuthenticateToken, async (req, res) => {
+  sendSuccess(res, { count: 0 });
 });
 
 export default router;

@@ -1,6 +1,7 @@
 import express from 'express';
 import { generateToken, validatePassword } from '../middleware/auth.js';
 import logger from '../config/logger.js';
+import { sendSuccess, sendError } from '../utils/envelope.js';
 
 const router = express.Router();
 
@@ -15,20 +16,14 @@ router.post('/api/v1/auth', async (req, res) => {
     const { password } = req.body;
 
     if (!password) {
-      return res.status(400).json({
-        success: false,
-        error: 'Password is required'
-      });
+      return sendError(res, 400, 'Password is required', 'Bad Request');
     }
 
     // Validate password
     const isValid = await validatePassword(password);
     
     if (!isValid) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid password'
-      });
+      return sendError(res, 401, 'Invalid password', 'Unauthorized');
     }
 
     // Generate JWT token
@@ -36,19 +31,13 @@ router.post('/api/v1/auth', async (req, res) => {
 
     logger.info('User authenticated successfully');
     
-    res.json({
-      success: true,
-      data: {
-        access_token: token,
-        token_type: 'bearer'
-      }
+    sendSuccess(res, {
+      access_token: token,
+      token_type: 'bearer'
     });
   } catch (error) {
     logger.error(`Auth error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      error: 'Authentication failed'
-    });
+    sendError(res, 500, 'Authentication failed');
   }
 });
 

@@ -18,16 +18,27 @@ class SocketManager {
   handleConnection(socket) {
     const deviceId = uuidv4();
     const userAgent = socket.handshake.headers['user-agent'] || 'unknown';
+    const transport = socket.conn?.transport?.name || 'unknown';
 
     this.connectedDevices.set(socket.id, {
       sid: socket.id,
       deviceId,
       userAgent,
+      transport,
       connectedAt: new Date().toISOString(),
       rooms: new Set()
     });
 
-    logger.info(`Client connected: ${socket.id} (device: ${deviceId})`);
+    logger.info(`Client connected: ${socket.id} (device: ${deviceId}, transport: ${transport})`);
+
+    socket.conn?.on('upgrade', (upgraded) => {
+      const newTransport = upgraded?.name || 'unknown';
+      const deviceInfo = this.connectedDevices.get(socket.id);
+      if (deviceInfo) {
+        deviceInfo.transport = newTransport;
+      }
+      logger.info(`Client transport upgraded: ${socket.id} -> ${newTransport}`);
+    });
 
     // Join global room
     socket.join('global');
@@ -36,7 +47,7 @@ class SocketManager {
     socket.emit('connection.confirmed', { deviceId });
 
     // Handle disconnection
-    socket.on('disconnect', () => this.handleDisconnect(socket));
+    socket.on('disconnect', (reason) => this.handleDisconnect(socket, reason));
 
     // Handle join/leave chat room events
     socket.on('join_chat', (data) => this.handleJoinChat(socket, data));
@@ -47,10 +58,10 @@ class SocketManager {
    * Handle client disconnection
    * @param {Socket} socket - Socket.IO socket
    */
-  handleDisconnect(socket) {
+  handleDisconnect(socket, reason = 'unknown') {
     const deviceInfo = this.connectedDevices.get(socket.id);
     if (deviceInfo) {
-      logger.info(`Client disconnected: ${socket.id} (device: ${deviceInfo.deviceId})`);
+      logger.info(`Client disconnected: ${socket.id} (device: ${deviceInfo.deviceId}) Reason: ${reason}`);
 
       // Leave all chat rooms
       deviceInfo.rooms.forEach((chatGuid) => {

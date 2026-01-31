@@ -8,17 +8,23 @@
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
-  "keywords": ["bluebubbles", "imessage", "socket.io", "bridge"],
+  "keywords": [
+    "bluebubbles",
+    "imessage",
+    "socket.io",
+    "bridge"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.6.1",
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
     "axios": "^1.6.5",
-    "jsonwebtoken": "^9.0.2",
     "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "crypto-js": "^4.2.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "socket.io": "^4.6.1",
     "uuid": "^9.0.1",
     "winston": "^3.11.0"
   },
