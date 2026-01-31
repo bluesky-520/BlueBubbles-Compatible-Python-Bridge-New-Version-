@@ -148,6 +148,62 @@ router.get('/api/v1/chat', optionalAuthenticateToken, async (req, res) => {
 });
 
 /**
+ * POST /api/v1/chat/new
+ * Create or find a chat by participant addresses. Must be before /api/v1/chat/:chatGuid so "new" is not matched as chatGuid.
+ * Body: { addresses: string[], message?: string }. Returns chat in BlueBubbles envelope.
+ */
+router.post('/api/v1/chat/new', optionalAuthenticateToken, async (req, res) => {
+  try {
+    const { addresses = [], message } = req.body || {};
+    const list = Array.isArray(addresses) ? addresses.map(a => String(a).trim()).filter(Boolean) : [];
+    if (list.length === 0) {
+      return sendError(res, 400, 'addresses array is required and cannot be empty', 'Bad Request');
+    }
+    const firstAddress = list[0];
+    const chats = await swiftDaemon.getChats();
+    const normalized = firstAddress.replace(/\r/g, '').replace(/\n/g, '');
+    const chat = chats.find(c => {
+      const guid = (c.guid || '').toLowerCase();
+      const addr = normalized.toLowerCase();
+      return guid.includes(addr) || guid.endsWith(addr) || guid.endsWith(addr.replace(/^\+/, ''));
+    });
+    let chatGuid;
+    let responseChat;
+    if (chat) {
+      chatGuid = chat.guid;
+      responseChat = toChatResponse(chat, { includeParticipants: true, includeLastMessage: true });
+    } else {
+      chatGuid = `iMessage;-;${normalized}`;
+      responseChat = {
+        guid: chatGuid,
+        style: list.length > 2 ? 43 : 0,
+        chatIdentifier: normalized,
+        isArchived: false,
+        displayName: '',
+        isFiltered: false,
+        groupId: list.length > 2 ? chatGuid : '',
+        properties: {},
+        lastAddressedHandle: null,
+        lastMessage: null,
+        participants: list.map(addr => ({ address: addr })),
+        originalROWID: 0
+      };
+    }
+    if (message && String(message).trim()) {
+      try {
+        await swiftDaemon.sendMessage(chatGuid, String(message).trim());
+      } catch (sendErr) {
+        logger.warn(`chat/new: optional initial message send failed: ${sendErr.message}`);
+      }
+    }
+    sendSuccess(res, responseChat);
+  } catch (error) {
+    logger.error(`Chat new error: ${error.message}`);
+    sendError(res, 500, error.message);
+  }
+});
+
+/**
  * GET /api/v1/chat/count
  * Must be before /api/v1/chat/:chatGuid so "count" is not matched as chatGuid.
  */
