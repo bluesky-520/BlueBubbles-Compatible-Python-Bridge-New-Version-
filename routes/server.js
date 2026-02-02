@@ -3,6 +3,7 @@ import logger from '../config/logger.js';
 import { sendSuccess } from '../utils/envelope.js';
 import { getServerMetadata } from '../services/server-metadata.js';
 import swiftDaemon from '../services/swift-daemon.js';
+import { optionalAuthenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 const SERVER_VERSION = process.env.SERVER_VERSION || '1.0.0';
@@ -11,7 +12,7 @@ const SERVER_VERSION = process.env.SERVER_VERSION || '1.0.0';
  * GET /api/v1/server/ping
  * Health check endpoint
  */
-router.get('/api/v1/server/ping', (req, res) => {
+router.get('/api/v1/server/ping', optionalAuthenticateToken, (req, res) => {
   sendSuccess(res, {
     version: '1.0.0',
     name: 'BlueBubbles Bridge (Node.js)',
@@ -31,7 +32,7 @@ router.get('/api/v1/server/ping', (req, res) => {
  * GET /api/v1/server/info
  * Server information
  */
-router.get('/api/v1/server/info', (req, res) => {
+router.get('/api/v1/server/info', optionalAuthenticateToken, (req, res) => {
   getServerMetadata()
     .then(meta => sendSuccess(res, meta))
     .catch(error => {
@@ -54,14 +55,14 @@ router.get('/api/v1/server/info', (req, res) => {
 /**
  * GET /api/v1/ping
  */
-router.get('/api/v1/ping', (req, res) => {
+router.get('/api/v1/ping', optionalAuthenticateToken, (req, res) => {
   sendSuccess(res, 'pong');
 });
 
 /**
  * GET /api/v1/server/permissions
  */
-router.get('/api/v1/server/permissions', (req, res) => {
+router.get('/api/v1/server/permissions', optionalAuthenticateToken, (req, res) => {
   sendSuccess(res, {
     contacts: 'notDetermined',
     accessibility: 'notDetermined',
@@ -75,7 +76,7 @@ router.get('/api/v1/server/permissions', (req, res) => {
 /**
  * POST /api/v1/server/permissions/request
  */
-router.post('/api/v1/server/permissions/request', (req, res) => {
+router.post('/api/v1/server/permissions/request', optionalAuthenticateToken, (req, res) => {
   logger.info('Permissions request received');
   sendSuccess(res, {
     contacts: 'notDetermined',
@@ -91,7 +92,7 @@ router.post('/api/v1/server/permissions/request', (req, res) => {
  * GET /api/v1/server/update/check
  * Matches official BlueBubbles format: { available, current, metadata }
  */
-router.get('/api/v1/server/update/check', (req, res) => {
+router.get('/api/v1/server/update/check', optionalAuthenticateToken, (req, res) => {
   sendSuccess(res, {
     available: false,
     current: SERVER_VERSION,
@@ -104,7 +105,7 @@ router.get('/api/v1/server/update/check', (req, res) => {
  * Matches official format: { handles, messages, chats, attachments }
  * Fetches from daemon when available.
  */
-router.get('/api/v1/server/statistics/totals', async (req, res) => {
+router.get('/api/v1/server/statistics/totals', optionalAuthenticateToken, async (req, res) => {
   try {
     const only = req.query.only;
     const opts = only ? { only: Array.isArray(only) ? only.join(',') : String(only) } : {};
@@ -126,7 +127,7 @@ router.get('/api/v1/server/statistics/totals', async (req, res) => {
  * Matches official format: { images, videos, locations }
  * Fetches from daemon when available.
  */
-router.get('/api/v1/server/statistics/media', async (req, res) => {
+router.get('/api/v1/server/statistics/media', optionalAuthenticateToken, async (req, res) => {
   try {
     const only = req.query.only;
     const opts = only ? { only: Array.isArray(only) ? only.join(',') : String(only) } : {};
@@ -147,7 +148,7 @@ router.get('/api/v1/server/statistics/media', async (req, res) => {
  * Matches official format: { identifier, displayName, emails, phones }
  * Without Private API, returns nulls (daemon has no iCloud access).
  */
-router.get('/api/v1/icloud/account', async (req, res) => {
+router.get('/api/v1/icloud/account', optionalAuthenticateToken, async (req, res) => {
   const meta = await getServerMetadata().catch(() => ({}));
   const detectedIcloud = meta.detected_icloud || process.env.DETECTED_ICLOUD || '';
   sendSuccess(res, {

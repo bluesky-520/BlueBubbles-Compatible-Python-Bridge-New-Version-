@@ -7,7 +7,7 @@ Node.js bridge that exposes BlueBubbles-compatible HTTP and Socket.IO APIs and p
 - **REST API** at `http://localhost:8000/api/v1` — BlueBubbles-style endpoints (server, chats, messages, contacts, handle, FCM)
 - **Socket.IO** — real-time events (join/leave chat, message.created, typing, read receipts)
 - **Daemon proxy** — talks to Swift daemon at `http://localhost:8081`; subscribes to SSE `/events` and broadcasts to clients
-- **Auth** — optional JWT; `POST /api/v1/auth` with password, then `?token=...` or `Authorization: Bearer <token>`
+- **Auth** — matches official BlueBubbles: `?password=xxx` or `?guid=xxx` on all API requests
 
 ## Requirements
 
@@ -48,13 +48,25 @@ npm run dev
 npm start
 ```
 
-## Auth
+## Authentication
 
-1. `POST /api/v1/auth` with `{ "password": "..." }` (if `SERVER_PASSWORD` is set).
-2. Response: `{ "data": { "access_token", "token_type": "Bearer" } }`.
-3. Use `?token=<token>` in query or `Authorization: Bearer <token>` on protected routes.
+**All `/api/v1` routes require authentication** using the server password, matching the official BlueBubbles server.
 
-Most routes use **optional** auth: they work without a token but accept one when provided.
+### Authentication (official BlueBubbles format)
+
+Pass the password as a query parameter on every request:
+
+- `?password=YOUR_SERVER_PASSWORD`
+- `?guid=YOUR_SERVER_PASSWORD` (alias)
+
+```bash
+curl "http://localhost:8000/api/v1/server/ping?password=mysecret"
+curl "http://localhost:8000/api/v1/chats?password=mysecret"
+```
+
+### Protected Routes
+
+**All routes require authentication** (including server, chat, message, contact, handle, and FCM endpoints). Only `POST /api/v1/auth` is public (for password validation if used).
 
 ## HTTP API
 
@@ -62,62 +74,63 @@ Base URL: **`http://localhost:8000/api/v1`**
 
 ### Server
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/ping` | `"pong"` |
-| GET | `/server/ping` | Version, features, timestamp |
-| GET | `/server/info` | OS, version, helper status |
-| GET | `/server/permissions` | Placeholder permissions |
-| POST | `/server/permissions/request` | Placeholder |
-| GET | `/server/update/check` | Placeholder (no update) |
-| GET | `/server/statistics/totals` | Placeholder totals |
-| GET | `/server/statistics/media` | Placeholder media stats |
-| GET | `/icloud/account` | Placeholder iCloud |
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/ping` | `"pong"` | ✅ |
+| GET | `/server/ping` | Version, features, timestamp | ✅ |
+| GET | `/server/info` | OS, version, helper status | ✅ |
+| GET | `/server/permissions` | Placeholder permissions | ✅ |
+| POST | `/server/permissions/request` | Placeholder | ✅ |
+| GET | `/server/update/check` | Placeholder (no update) | ✅ |
+| GET | `/server/statistics/totals` | Placeholder totals | ✅ |
+| GET | `/server/statistics/media` | Placeholder media stats | ✅ |
+| GET | `/icloud/account` | Placeholder iCloud | ✅ |
+| POST | `/auth` | Obtain JWT token | ❌ |
 
 ### Chats
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/chats` | List all chats (from daemon) |
-| GET | `/chats/:chatGuid` | Single chat by GUID |
-| GET | `/chat` | Alias chat list |
-| GET | `/chat/:chatGuid` | Single chat |
-| GET | `/chat/count` | Chat count |
-| POST | `/chat/new` | Create/find chat by addresses |
-| POST | `/chat/query` | Query chats (body: `with`, etc.) |
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/chats` | List all chats (from daemon) | ✅ |
+| GET | `/chats/:chatGuid` | Single chat by GUID | ✅ |
+| GET | `/chat` | Alias chat list | ✅ |
+| GET | `/chat/:chatGuid` | Single chat | ✅ |
+| GET | `/chat/count` | Chat count | ✅ |
+| POST | `/chat/new` | Create/find chat by addresses | ✅ |
+| POST | `/chat/query` | Query chats (body: `with`, etc.) | ✅ |
 
 **Chat GUID:** Use exact `guid` from `GET /chats`. If the path has `;` or `+`, URL-encode (`%3B`, `%2B`). The bridge encodes the GUID when calling the daemon.
 
 ### Messages
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/chat/:chatGuid/message` | Messages for chat. Query: `limit` (1–1000, default 50), `offset`, `before`, `after`, `sort` (ASC/DESC). Returns 404 if chat not found. |
-| POST | `/message/text` | Send text. Body: `{ chatGuid, text, tempGuid?, attachmentPaths? }` |
-| GET | `/message/count` | Message count. Query: `chatGuid` |
-| GET | `/attachment/:guid` | Stream attachment by GUID |
-| POST | `/typing-indicator` | Body: `{ chatGuid, isTyping }` |
-| POST | `/read_receipt` | Body: `{ chatGuid, messageGuids }` |
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/chat/:chatGuid/message` | Messages for chat. Query: `limit` (1–1000, default 50), `offset`, `before`, `after`, `sort` (ASC/DESC). Returns 404 if chat not found. | ✅ |
+| POST | `/message/text` | Send text. Body: `{ chatGuid, text, tempGuid?, attachmentPaths? }` | ✅ |
+| GET | `/message/count` | Message count. Query: `chatGuid` | ✅ |
+| GET | `/attachment/:guid` | Stream attachment by GUID | ✅ |
+| POST | `/typing-indicator` | Body: `{ chatGuid, isTyping }` | ✅ |
+| POST | `/read_receipt` | Body: `{ chatGuid, messageGuids }` | ✅ |
 
 ### Contacts
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/contacts` | List contacts (from daemon). Query: `limit`, `offset`, `extraProperties` |
-| GET | `/contacts/vcf` | Contacts as vCard |
-| GET | `/contact` | Single contact (query) |
-| GET | `/icloud/contact` | iCloud contact placeholder |
-| POST | `/contacts/query` | Body: `{ address }` etc. |
-| POST | `/contact/query` | Contact query |
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/contacts` | List contacts (from daemon). Query: `limit`, `offset`, `extraProperties` | ✅ |
+| GET | `/contacts/vcf` | Contacts as vCard | ✅ |
+| GET | `/contact` | Single contact (query) | ✅ |
+| GET | `/icloud/contact` | iCloud contact placeholder | ✅ |
+| POST | `/contacts/query` | Body: `{ address }` etc. | ✅ |
+| POST | `/contact/query` | Contact query | ✅ |
 
 ### Handle & FCM
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/handle/availability/imessage` | Placeholder availability |
-| GET | `/handle/:address/focus` | Placeholder |
-| GET | `/fcm/client` | FCM client config placeholder |
-| POST | `/fcm/device` | FCM device placeholder |
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/handle/availability/imessage` | Placeholder availability | ✅ |
+| GET | `/handle/:address/focus` | Placeholder | ✅ |
+| GET | `/fcm/client` | FCM client config placeholder | ✅ |
+| POST | `/fcm/device` | FCM device placeholder | ✅ |
 
 Responses use envelope format: `{ status, message, data?, metadata?, error? }`.
 
