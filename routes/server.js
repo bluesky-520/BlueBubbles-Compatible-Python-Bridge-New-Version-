@@ -2,8 +2,10 @@ import express from 'express';
 import logger from '../config/logger.js';
 import { sendSuccess } from '../utils/envelope.js';
 import { getServerMetadata } from '../services/server-metadata.js';
+import swiftDaemon from '../services/swift-daemon.js';
 
 const router = express.Router();
+const SERVER_VERSION = process.env.SERVER_VERSION || '1.0.0';
 
 /**
  * GET /api/v1/server/ping
@@ -87,44 +89,71 @@ router.post('/api/v1/server/permissions/request', (req, res) => {
 
 /**
  * GET /api/v1/server/update/check
+ * Matches official BlueBubbles format: { available, current, metadata }
  */
 router.get('/api/v1/server/update/check', (req, res) => {
   sendSuccess(res, {
-    updateAvailable: false,
-    version: null,
-    url: null
+    available: false,
+    current: SERVER_VERSION,
+    metadata: null
   });
 });
 
 /**
  * GET /api/v1/server/statistics/totals
+ * Matches official format: { handles, messages, chats, attachments }
+ * Fetches from daemon when available.
  */
-router.get('/api/v1/server/statistics/totals', (req, res) => {
-  sendSuccess(res, {
-    totalChats: 0,
-    totalMessages: 0,
-    totalAttachments: 0
-  });
+router.get('/api/v1/server/statistics/totals', async (req, res) => {
+  try {
+    const only = req.query.only;
+    const opts = only ? { only: Array.isArray(only) ? only.join(',') : String(only) } : {};
+    const data = await swiftDaemon.getStatisticsTotals(opts);
+    sendSuccess(res, data);
+  } catch (error) {
+    logger.warn(`Statistics totals fallback (daemon unavailable): ${error.message}`);
+    sendSuccess(res, {
+      handles: 0,
+      messages: 0,
+      chats: 0,
+      attachments: 0
+    });
+  }
 });
 
 /**
  * GET /api/v1/server/statistics/media
+ * Matches official format: { images, videos, locations }
+ * Fetches from daemon when available.
  */
-router.get('/api/v1/server/statistics/media', (req, res) => {
-  sendSuccess(res, {
-    totalAttachments: 0,
-    totalMediaSize: 0
-  });
+router.get('/api/v1/server/statistics/media', async (req, res) => {
+  try {
+    const only = req.query.only;
+    const opts = only ? { only: Array.isArray(only) ? only.join(',') : String(only) } : {};
+    const data = await swiftDaemon.getStatisticsMedia(opts);
+    sendSuccess(res, data);
+  } catch (error) {
+    logger.warn(`Statistics media fallback (daemon unavailable): ${error.message}`);
+    sendSuccess(res, {
+      images: 0,
+      videos: 0,
+      locations: 0
+    });
+  }
 });
 
 /**
  * GET /api/v1/icloud/account
+ * Matches official format: { identifier, displayName, emails, phones }
+ * Without Private API, returns nulls (daemon has no iCloud access).
  */
-router.get('/api/v1/icloud/account', (req, res) => {
+router.get('/api/v1/icloud/account', async (req, res) => {
+  const meta = await getServerMetadata().catch(() => ({}));
+  const detectedIcloud = meta.detected_icloud || process.env.DETECTED_ICLOUD || '';
   sendSuccess(res, {
-    identifier: null,
+    identifier: detectedIcloud || null,
     displayName: null,
-    emails: null,
+    emails: detectedIcloud ? [detectedIcloud] : null,
     phones: null
   });
 });

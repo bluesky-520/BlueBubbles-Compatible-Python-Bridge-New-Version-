@@ -50,6 +50,22 @@ class SwiftDaemonClient {
   }
 
   /**
+   * Get a single chat by GUID (includes participants)
+   * @param {string} chatGuid - Chat GUID
+   * @returns {Promise<Object|null>} Chat object or null if not found
+   */
+  async getChat(chatGuid) {
+    try {
+      const response = await this.axios.get(`/chats/${encodeURIComponent(chatGuid)}`);
+      return response.data;
+    } catch (error) {
+      if (error?.response?.status === 404) return null;
+      logger.error(`Failed to fetch chat ${chatGuid}: ${error.message}`);
+      throw new Error('Failed to fetch chat');
+    }
+  }
+
+  /**
    * Get messages for a specific chat
    * @param {string} chatGuid - Chat GUID
    * @param {number} limit - Number of messages to fetch
@@ -61,7 +77,7 @@ class SwiftDaemonClient {
       const params = { limit };
       if (before) params.before = before;
 
-      const response = await this.axios.get(`/chats/${chatGuid}/messages`, { params });
+      const response = await this.axios.get(`/chats/${encodeURIComponent(chatGuid)}/messages`, { params });
       logger.debug(`Fetched ${response.data.length} messages for chat ${chatGuid}`);
       return response.data;
     } catch (error) {
@@ -113,14 +129,22 @@ class SwiftDaemonClient {
    * Send message via AppleScript
    * @param {string} chatGuid - Chat GUID
    * @param {string} text - Message text
+   * @param {Object} [opts] - Optional payload
+   * @param {string[]} [opts.attachmentPaths] - POSIX paths to files to attach
+   * @param {string} [opts.tempGuid] - Client-generated GUID for deduplication
    * @returns {Promise<Object>} Result from Swift daemon
    */
-  async sendMessage(chatGuid, text) {
+  async sendMessage(chatGuid, text, opts = {}) {
     try {
-      const response = await this.axios.post('/send', {
+      const body = {
         chat_guid: chatGuid,
-        text: text
-      });
+        text: text || ''
+      };
+      if (Array.isArray(opts.attachmentPaths) && opts.attachmentPaths.length) {
+        body.attachment_paths = opts.attachmentPaths;
+      }
+      if (opts.tempGuid) body.temp_guid = opts.tempGuid;
+      const response = await this.axios.post('/send', body);
       logger.info(`Message sent to chat ${chatGuid}`);
       return response.data;
     } catch (error) {
@@ -170,6 +194,71 @@ class SwiftDaemonClient {
     } catch (error) {
       logger.warn(`Failed to send typing indicator: ${error.message}`);
       // Don't throw - typing is best-effort
+    }
+  }
+
+  /**
+   * Send read receipt to Swift daemon (stored and returned in GET /messages/updates).
+   * @param {string} chatGuid - Chat GUID
+   * @param {string[]} messageGuids - Message GUIDs marked as read
+   */
+  async sendReadReceipt(chatGuid, messageGuids) {
+    try {
+      await this.axios.post('/read_receipt', {
+        chat_guid: chatGuid,
+        message_guids: messageGuids
+      });
+    } catch (error) {
+      logger.warn(`Failed to send read receipt: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetch attachment file from Swift daemon (stream). Returns response with responseType 'stream'.
+   * @param {string} guid - Attachment GUID
+   * @returns {Promise<Object>} Axios response with response.data as stream
+   */
+  async getAttachmentStream(guid) {
+    const response = await this.axios.get(`/attachments/${encodeURIComponent(guid)}`, {
+      responseType: 'stream',
+      timeout: 60000
+    });
+    return response;
+  }
+
+  /**
+   * Get database statistics totals (handles, messages, chats, attachments)
+   * @param {Object} [opts]
+   * @param {string} [opts.only] - Comma-separated: handle, message, chat, attachment
+   * @returns {Promise<Object>} { handles, messages, chats, attachments }
+   */
+  async getStatisticsTotals(opts = {}) {
+    try {
+      const params = {};
+      if (opts.only) params.only = opts.only;
+      const response = await this.axios.get('/statistics/totals', { params });
+      return response.data;
+    } catch (error) {
+      logger.error(`Failed to fetch statistics totals: ${error.message}`);
+      throw new Error('Failed to fetch statistics totals from Swift daemon');
+    }
+  }
+
+  /**
+   * Get media statistics (images, videos, locations)
+   * @param {Object} [opts]
+   * @param {string} [opts.only] - Comma-separated: image, video, location
+   * @returns {Promise<Object>} { images, videos, locations }
+   */
+  async getStatisticsMedia(opts = {}) {
+    try {
+      const params = {};
+      if (opts.only) params.only = opts.only;
+      const response = await this.axios.get('/statistics/media', { params });
+      return response.data;
+    } catch (error) {
+      logger.error(`Failed to fetch statistics media: ${error.message}`);
+      throw new Error('Failed to fetch statistics media from Swift daemon');
     }
   }
 

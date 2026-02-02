@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import logger from '../config/logger.js';
 import swiftDaemon from '../services/swift-daemon.js';
+import sendCache from '../services/send-cache.js';
 import { getFcmClientConfig } from '../services/fcm-config.js';
 import { getServerMetadata } from '../services/server-metadata.js';
 import {
@@ -9,8 +10,10 @@ import {
   createServerErrorResponse,
   createBadRequestResponse,
   createNoDataResponse,
-  sendSocketResponse
+  sendSocketResponse,
+  ErrorTypes
 } from '../utils/socket-response.js';
+import { toClientTimestamp } from '../utils/dates.js';
 
 const VCF_PATH = path.join(process.cwd(), 'data', 'AddressBook.vcf');
 
@@ -22,6 +25,14 @@ const ensureVcfDir = () => {
 const toChatIdentifier = (guid) => {
   if (!guid) return '';
   return guid.includes(';') ? guid.slice(guid.lastIndexOf(';') + 1) : guid;
+};
+
+/** Extract address from guid for display (never show internal ";-;" in UI). */
+const toDisplayIdentifier = (guid) => {
+  if (!guid) return '';
+  const idx = guid.indexOf(';-;');
+  if (idx >= 0) return guid.slice(idx + 3).trim();
+  return toChatIdentifier(guid);
 };
 
 const toChatResponse = (chat) => {
@@ -37,17 +48,18 @@ const toChatResponse = (chat) => {
         handle: null
       }
     : null;
+  const participants = Array.isArray(chat.participants) ? chat.participants : null;
   return {
     originalROWID: 0,
     guid: chat.guid,
-    participants: null,
+    participants,
     messages: null,
     lastMessage,
     properties: chat.properties || null,
     style: 0,
     chatIdentifier: toChatIdentifier(chat.guid),
     isArchived: chat.isArchived || false,
-    displayName: chat.displayName || '',
+    displayName: chat.displayName || toDisplayIdentifier(chat.guid),
     groupId: ''
   };
 };
@@ -264,36 +276,96 @@ export const registerSocketEvents = (socket, socketManager) => {
     if (!params?.identifier) {
       return respond(cb, 'error', createBadRequestResponse('No chat identifier provided'));
     }
-    return respond(cb, 'participants', createSuccessResponse([]));
+    try {
+      const chat = await swiftDaemon.getChat(params.identifier);
+      if (!chat) {
+        return respond(cb, 'error', createBadRequestResponse('Chat does not exist (get-participants)'));
+      }
+      const participants = Array.isArray(chat.participants) ? chat.participants : [];
+      return respond(cb, 'participants', createSuccessResponse(participants));
+    } catch (error) {
+      logger.error(`get-participants error: ${error.message}`);
+      return respond(cb, 'error', createServerErrorResponse(error.message));
+    }
   });
 
   socket.on('send-message', async (params, cb) => {
     const chatGuid = params?.guid;
     const tempGuid = params?.tempGuid;
     const message = params?.message;
+    const attachmentPaths = Array.isArray(params?.attachmentPaths) ? params.attachmentPaths.filter(Boolean) : [];
     if (!chatGuid) {
       return respond(cb, 'error', createBadRequestResponse('No chat GUID provided'));
     }
-    if ((tempGuid && !message) || (!tempGuid && message)) {
+    if (!tempGuid) {
       return respond(cb, 'error', createBadRequestResponse('No temporary GUID provided with message'));
     }
     if (params?.attachment) {
-      return respond(cb, 'message-send-error', createServerErrorResponse('Attachments not supported'));
+      return respond(cb, 'message-send-error', createServerErrorResponse('Use attachmentPaths (array of server file paths) for attachments'));
     }
+    if ((message || '').trim() === '' && attachmentPaths.length === 0) {
+      return respond(cb, 'error', createBadRequestResponse('Message text or attachmentPaths required'));
+    }
+    if (sendCache.find(tempGuid)) {
+      return respond(
+        cb,
+        'error',
+        createBadRequestResponse(`Message is already queued to be sent (Temp GUID: ${tempGuid})!`)
+      );
+    }
+    sendCache.add(tempGuid);
     try {
-      const result = await swiftDaemon.sendMessage(chatGuid, message || '');
+      const result = await swiftDaemon.sendMessage(chatGuid, message || '', {
+        attachmentPaths: attachmentPaths.length ? attachmentPaths : undefined,
+        tempGuid
+      });
+      const sentMessage = {
+        guid: result?.guid || tempGuid,
+        text: message || '',
+        chatGuid,
+        dateCreated: result?.dateCreated ?? Date.now(),
+        isFromMe: true,
+        type: 'text',
+        error: 0
+      };
       const msg = toMessageResponse(
         {
-          guid: result.guid || tempGuid,
-          text: message || '',
-          dateCreated: Date.now(),
-          isFromMe: true
+          ...sentMessage,
+          dateCreated: toClientTimestamp(sentMessage.dateCreated) ?? Date.now()
         },
         chatGuid
       );
+      msg.tempGuid = tempGuid;
+      msg.guid = sentMessage.guid;
+      sendCache.remove(tempGuid);
       return respond(cb, 'message-sent', createSuccessResponse(msg));
     } catch (error) {
-      return respond(cb, 'send-message-error', createServerErrorResponse(error.message));
+      sendCache.remove(tempGuid);
+      const errorData = {
+        ...toMessageResponse(
+          {
+            guid: null,
+            text: message || '',
+            chatGuid,
+            dateCreated: Date.now(),
+            isFromMe: true,
+            error: 4
+          },
+          chatGuid
+        ),
+        tempGuid,
+        error: 4
+      };
+      return respond(
+        cb,
+        'message-send-error',
+        createServerErrorResponse(
+          error.message,
+          ErrorTypes.IMESSAGE_ERROR,
+          'Failed to send message! See attached message error code.',
+          errorData
+        )
+      );
     }
   });
 

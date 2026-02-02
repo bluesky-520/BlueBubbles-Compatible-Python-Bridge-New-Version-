@@ -161,6 +161,28 @@ router.get('/api/v1/contacts', optionalAuthenticateToken, async (req, res) => {
 });
 
 /**
+ * GET /api/v1/icloud/contact
+ * Look up contact by address/guid (e.g. ?guid=1Easywayin!). Returns single contact or null.
+ */
+router.get('/api/v1/icloud/contact', optionalAuthenticateToken, async (req, res) => {
+  try {
+    const guid = req.query?.guid ? String(req.query.guid).trim() : '';
+    if (!guid) {
+      return sendSuccess(res, null);
+    }
+    const extraProps = normalizeExtraProperties(req.query?.extraProperties);
+    const contacts = await getContactsCached({ extraProperties: extraProps });
+    const mapped = mapContacts(contacts, extraProps);
+    const matches = filterByAddresses(mapped, [guid]);
+    const data = matches.length > 0 ? matches[0] : null;
+    sendSuccess(res, data);
+  } catch (error) {
+    logger.error(`Get icloud/contact error: ${error.message}`);
+    sendError(res, 500, error.message);
+  }
+});
+
+/**
  * GET /api/v1/contact
  * Alias for BlueBubbles clients expecting singular endpoint
  */

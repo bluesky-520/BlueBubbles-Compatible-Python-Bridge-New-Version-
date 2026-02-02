@@ -16,6 +16,36 @@ const parseWithQuery = (value) => {
     .filter(Boolean);
 };
 
+/** Extract address part from chat GUID (e.g. "iMessage;-;+123" -> "+123"). */
+const addressFromGuid = (guid) => {
+  if (!guid) return '';
+  const idx = guid.indexOf(';-;');
+  return idx >= 0 ? guid.slice(idx + 3).trim() : guid;
+};
+
+/** Find chat by exact guid or by matching address (handles + prefix mismatch). */
+const findChatByGuid = (chats, chatGuid) => {
+  let chat = chats.find(c => c.guid === chatGuid);
+  if (chat) return chat;
+  const wantAddr = addressFromGuid(chatGuid);
+  if (!wantAddr) return null;
+  const wantNorm = wantAddr.replace(/^\+/, '').toLowerCase();
+  return chats.find(c => {
+    const addr = addressFromGuid(c.guid || '');
+    if (!addr) return false;
+    const norm = addr.replace(/^\+/, '').toLowerCase();
+    return norm === wantNorm || addr.toLowerCase() === wantAddr.toLowerCase();
+  }) || null;
+};
+
+/** Clean identifier for display (never expose internal ";-;" in UI). */
+const toDisplayIdentifier = (guid) => {
+  if (!guid) return '';
+  const addr = addressFromGuid(guid);
+  if (addr) return addr;
+  return guid.includes(';') ? guid.slice(guid.lastIndexOf(';') + 1) : guid;
+};
+
 const toChatResponse = (chat, options = {}) => {
   const { includeParticipants = false, includeMessages = false, includeLastMessage = true } = options;
   const guid = chat.guid;
@@ -26,12 +56,12 @@ const toChatResponse = (chat, options = {}) => {
   const rawLastDate = chat.lastMessageDate ?? chat.last_message_date ?? 0;
   const lastMessageDate = toClientTimestamp(rawLastDate) ?? 0;
   const response = {
-    originalROWID: chat.originalROWID || 0,
+    originalROWID: Number(chat.originalROWID) || 0,
     guid,
-    style: chat.style || 0,
+    style: Number(chat.style) || 0,
     chatIdentifier: inferredIdentifier,
     isArchived: chat.isArchived || false,
-    displayName: chat.displayName || '',
+    displayName: chat.displayName || toDisplayIdentifier(guid),
     isFiltered: chat.isFiltered || false,
     groupId: chat.groupId || '',
     properties: chat.properties || {},
@@ -39,12 +69,13 @@ const toChatResponse = (chat, options = {}) => {
   };
 
   if (includeLastMessage) {
+    const dateCreated = lastMessageDate != null ? Number(lastMessageDate) : null;
     response.lastMessage =
       chat.lastMessage ??
-      (lastMessageText || lastMessageDate
+      (lastMessageText || dateCreated != null
         ? {
             text: lastMessageText || '',
-            dateCreated: lastMessageDate, // ms since epoch (converted from Apple ns if needed)
+            dateCreated, // ms since epoch (int for client)
             guid: null,
             isFromMe: false,
             handle: null
@@ -101,9 +132,8 @@ router.get('/api/v1/chats/:chatGuid', optionalAuthenticateToken, async (req, res
     const includeMessages = withQuery.includes('messages');
     const { chatGuid } = req.params;
     const chats = await swiftDaemon.getChats();
-    
-    const chat = chats.find(c => c.guid === chatGuid);
-    
+    const chat = findChatByGuid(chats, chatGuid);
+
     if (!chat) {
       return sendError(res, 404, 'Chat not found', 'Not Found');
     }
@@ -150,15 +180,21 @@ router.get('/api/v1/chat', optionalAuthenticateToken, async (req, res) => {
 /**
  * POST /api/v1/chat/new
  * Create or find a chat by participant addresses. Must be before /api/v1/chat/:chatGuid so "new" is not matched as chatGuid.
- * Body: { addresses: string[], message?: string }. Returns chat in BlueBubbles envelope.
+ * Body: { addresses: string[], message?: string, service?: 'iMessage'|'SMS' }. Returns chat in BlueBubbles envelope.
  */
 router.post('/api/v1/chat/new', optionalAuthenticateToken, async (req, res) => {
   try {
-    const { addresses = [], message } = req.body || {};
-    const list = Array.isArray(addresses) ? addresses.map(a => String(a).trim()).filter(Boolean) : [];
-    if (list.length === 0) {
-      return sendError(res, 400, 'addresses array is required and cannot be empty', 'Bad Request');
+    const { addresses = [], message, service } = req.body || {};
+    let list = Array.isArray(addresses) ? addresses.map(a => String(a).trim()).filter(Boolean) : [];
+    // Allow single address via query ?guid=... when body has no addresses (client compatibility)
+    if (list.length === 0 && req.query?.guid) {
+      const guid = String(req.query.guid).trim();
+      if (guid) list = [guid];
     }
+    if (list.length === 0) {
+      return sendError(res, 400, 'addresses array is required and cannot be empty (or provide ?guid=...)', 'Bad Request');
+    }
+    const serviceType = (service === 'SMS' || service === 'iMessage') ? service : 'iMessage';
     const firstAddress = list[0];
     const chats = await swiftDaemon.getChats();
     const normalized = firstAddress.replace(/\r/g, '').replace(/\n/g, '');
@@ -173,7 +209,7 @@ router.post('/api/v1/chat/new', optionalAuthenticateToken, async (req, res) => {
       chatGuid = chat.guid;
       responseChat = toChatResponse(chat, { includeParticipants: true, includeLastMessage: true });
     } else {
-      chatGuid = `iMessage;-;${normalized}`;
+      chatGuid = `${serviceType};-;${normalized}`;
       responseChat = {
         guid: chatGuid,
         style: list.length > 2 ? 43 : 0,
@@ -186,7 +222,7 @@ router.post('/api/v1/chat/new', optionalAuthenticateToken, async (req, res) => {
         lastAddressedHandle: null,
         lastMessage: null,
         participants: list.map(addr => ({ address: addr })),
-        originalROWID: 0
+        originalROWID: 0 // int for client (Flutter int?)
       };
     }
     if (message && String(message).trim()) {
@@ -196,7 +232,7 @@ router.post('/api/v1/chat/new', optionalAuthenticateToken, async (req, res) => {
         logger.warn(`chat/new: optional initial message send failed: ${sendErr.message}`);
       }
     }
-    sendSuccess(res, responseChat);
+    sendSuccess(res, responseChat, 'Successfully created chat!');
   } catch (error) {
     logger.error(`Chat new error: ${error.message}`);
     sendError(res, 500, error.message);
@@ -262,8 +298,24 @@ router.get('/api/v1/chat/:chatGuid', optionalAuthenticateToken, async (req, res)
     const includeLastMessage = withQuery.includes('lastmessage') || withQuery.includes('last-message');
     const includeMessages = withQuery.includes('messages');
     const { chatGuid } = req.params;
-    const chats = await swiftDaemon.getChats();
-    const chat = chats.find(c => c.guid === chatGuid);
+    const queryGuid = req.query?.guid ? String(req.query.guid).trim() : null;
+    let chats = await swiftDaemon.getChats();
+    let chat = findChatByGuid(chats, chatGuid);
+
+    // Fallback: client often sends ?guid= as alternate identifier (e.g. 1Easywayin! vs iMessage;-;14567894564)
+    if (!chat && queryGuid) {
+      chat = findChatByGuid(chats, queryGuid);
+    }
+
+    // Fallback: chat may not be in list (e.g. not recently active); try direct fetch from daemon
+    if (!chat) {
+      const direct = await swiftDaemon.getChat(chatGuid);
+      if (direct) chat = direct;
+      else if (queryGuid && queryGuid !== chatGuid) {
+        const directByQuery = await swiftDaemon.getChat(queryGuid);
+        if (directByQuery) chat = directByQuery;
+      }
+    }
 
     if (!chat) {
       return sendError(res, 404, 'Chat not found', 'Not Found');
