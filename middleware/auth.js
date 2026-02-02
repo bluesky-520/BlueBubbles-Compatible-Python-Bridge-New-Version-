@@ -13,7 +13,7 @@ export const getServerPassword = () =>
   );
 
 export const readQueryToken = (req) => {
-  const token = req.query?.guid ?? req.query?.password ?? req.query?.token;
+  const token = req.query?.password ?? req.query?.guid;
   if (Array.isArray(token)) return token[0];
   return token ?? null;
 };
@@ -66,20 +66,10 @@ export const authenticateToken = (req, res, next) => {
 };
 
 /**
- * Optional JWT middleware
- * Allows requests without an Authorization header
+ * Authentication middleware (matches official BlueBubbles server)
+ * Query params only: ?password=xxx or ?guid=xxx
  */
 export const optionalAuthenticateToken = (req, res, next) => {
-  const token = readQueryToken(req);
-
-  if (!token) {
-    logger.debug('Client attempted to access API without a token');
-    return res.status(401).json({
-      success: false,
-      error: 'Missing server password!'
-    });
-  }
-
   const password = getServerPassword();
   if (!password) {
     logger.error('Server password not configured');
@@ -89,8 +79,17 @@ export const optionalAuthenticateToken = (req, res, next) => {
     });
   }
 
+  const token = readQueryToken(req);
+  if (!token) {
+    logger.debug('Client attempted to access API without credentials');
+    return res.status(401).json({
+      success: false,
+      error: 'Missing server password!'
+    });
+  }
+
   if (String(token).trim() !== String(password).trim()) {
-    logger.debug('Client tried to authenticate with incorrect password');
+    logger.debug('Client provided invalid password');
     return res.status(401).json({
       success: false,
       error: 'Unauthorized'
