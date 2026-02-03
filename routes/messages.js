@@ -1,12 +1,34 @@
 import express from 'express';
+import axios from 'axios';
 import swiftDaemon from '../services/swift-daemon.js';
 import sendCache from '../services/send-cache.js';
 import { optionalAuthenticateToken } from '../middleware/auth.js';
 import logger from '../config/logger.js';
 import { sendSuccess, sendError } from '../utils/envelope.js';
-import { toClientTimestamp } from '../utils/dates.js';
+import { toClientTimestamp, unixMsToAppleNs } from '../utils/dates.js';
+import { withIncludesAttachment, normalizeAttachments } from '../utils/attachments.js';
 
 const router = express.Router();
+
+/** n8n (or other) webhook URL - when set, POST message payload on send (fire-and-forget). */
+const WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || process.env.WEBHOOK_MESSAGE_SENT_URL || '';
+
+/**
+ * Fire webhook trigger for new message (non-blocking).
+ * Payload: { type: 'new-message', data: messagePayload } for n8n Webhook node.
+ */
+function fireMessageSentWebhook(data) {
+  if (!WEBHOOK_URL || typeof WEBHOOK_URL !== 'string' || !WEBHOOK_URL.trim()) return;
+  const payload = { type: 'new-message', data };
+  axios
+    .post(WEBHOOK_URL.trim(), payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 10000
+    })
+    .catch(err => {
+      logger.warn(`Webhook trigger failed: ${err?.message || err}`);
+    });
+}
 
 /**
  * Build BlueBubbles-style message payload (matches MessageSerializer / message.match).
@@ -25,7 +47,7 @@ function toMessagePayload(msg, chatGuid, opts = {}) {
     type: msg.type || 'text',
     subject: msg.subject || null,
     error: errorCode,
-    attachments: msg.attachments || [],
+    attachments: normalizeAttachments(msg.attachments || []),
     associatedMessageGuid: msg.associatedMessageGuid || null,
     associatedMessageType: msg.associatedMessageType || null
   };
@@ -36,17 +58,28 @@ function toMessagePayload(msg, chatGuid, opts = {}) {
 /**
  * GET /api/v1/chat/:chatGuid/message
  * BlueBubbles-compatible message list (matches official server: query params, 404 when chat missing, metadata).
- * Query: limit (1-1000, default 50), offset (row offset, default 0), before, after (unix ms), sort (ASC|DESC).
+ * Query: limit (1-1000, default 50), offset (row offset, default 0), before, after (unix ms), sort (ASC|DESC), with (attachment, etc.).
+ * Daemon returns chronological (oldest first). ASC = keep chronological; DESC = newest first. Default sort=ASC to match get-messages.
  */
+/** Parse optional numeric query param; avoid truthy non-numeric values (e.g. ?before gives true). */
+function parseOptionalNum(val) {
+  if (val == null) return null;
+  const n = typeof val === 'number' ? val : parseInt(String(val).trim(), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 router.get('/api/v1/chat/:chatGuid/message', optionalAuthenticateToken, async (req, res) => {
   try {
     const { chatGuid } = req.params;
     const limitRaw = req.query?.limit != null ? parseInt(req.query.limit, 10) : 50;
     const limit = Math.min(Math.max(Number.isNaN(limitRaw) ? 50 : limitRaw, 1), 1000);
-    const offset = req.query?.offset != null ? Math.max(0, parseInt(req.query.offset, 10) || 0) : 0;
-    const before = req.query?.before != null ? parseInt(req.query.before, 10) : null;
-    const after = req.query?.after != null ? parseInt(req.query.after, 10) : null;
-    const sort = (req.query?.sort === 'ASC' || req.query?.sort === 'DESC') ? req.query.sort : null;
+    const offset = Math.max(0, parseOptionalNum(req.query?.offset) ?? 0);
+    const before = parseOptionalNum(req.query?.before);
+    const after = parseOptionalNum(req.query?.after);
+    const sortParam = req.query?.sort;
+    const sort = (sortParam === 'ASC' || sortParam === 'DESC') ? sortParam : 'ASC';
+    const withParam = req.query?.with ?? req.query?.withs ?? req.query?.withAttachments;
+    const includeAttachments = withIncludesAttachment(withParam);
 
     // Official server: verify chat exists first → 404 "Chat does not exist!"
     const chat = await swiftDaemon.getChat(chatGuid);
@@ -55,11 +88,13 @@ router.get('/api/v1/chat/:chatGuid/message', optionalAuthenticateToken, async (r
     }
 
     // Daemon only supports limit + before; fetch enough for offset (request limit + offset, then slice)
+    // Client sends before in Unix ms; daemon DB uses Apple ns (since 2001-01-01)
     const fetchLimit = Math.min(limit + offset, 1000);
+    const beforeAppleNs = before != null ? unixMsToAppleNs(before) : null;
     const messages = await swiftDaemon.getMessages(
       chatGuid,
       fetchLimit,
-      before
+      beforeAppleNs || undefined
     );
 
     // Optional client-side filter by after (daemon has no after param)
@@ -67,29 +102,40 @@ router.get('/api/v1/chat/:chatGuid/message', optionalAuthenticateToken, async (r
     if (after != null && after > 0) {
       filtered = messages.filter(msg => (toClientTimestamp(msg.dateCreated) ?? 0) > after);
     }
-    if (sort === 'ASC') {
+    // Daemon returns chronological (ASC). DESC = newest first = reverse.
+    if (sort === 'DESC') {
       filtered = [...filtered].reverse();
     }
     // Apply offset (daemon has no offset param)
     const sliced = offset > 0 ? filtered.slice(offset, offset + limit) : filtered.slice(0, limit);
-
-    const formattedMessages = sliced.map(msg => ({
+    const formattedMessages = sliced.map(msg => {
+      // Client expects handleId as int? (handle ROWID); daemon may send address string or empty. Send number or null only.
+      const rawHandleId = msg.handleId;
+      const handleId =
+        rawHandleId != null && String(rawHandleId).trim() !== ''
+          ? (Number(rawHandleId) || null)
+          : null;
+      const handleAddress = msg.sender || (typeof rawHandleId === 'string' ? rawHandleId : null);
+      const rawAttachments = includeAttachments ? (msg.attachments || []) : [];
+      const attachments = normalizeAttachments(rawAttachments);
+      return {
       guid: msg.guid,
       text: msg.text || null,
       chatGuid: chatGuid,
       sender: msg.sender || 'Unknown',
-      handleId: msg.handleId ?? '',
-      handle: msg.handleId != null ? { address: msg.sender || msg.handleId, id: msg.handleId } : null,
+      handleId,
+      handle: handleAddress != null ? { address: handleAddress, id: handleId } : null,
       dateCreated: toClientTimestamp(msg.dateCreated) ?? Date.now(),
       dateRead: toClientTimestamp(msg.dateRead) ?? null,
       isFromMe: msg.isFromMe !== false,
-      attachments: msg.attachments || [],
+      attachments,
       subject: msg.subject || null,
       type: msg.type || 'text',
       error: msg.error != null ? Number(msg.error) : 0,
       associatedMessageGuid: msg.associatedMessageGuid || null,
       associatedMessageType: msg.associatedMessageType || null
-    }));
+      };
+    });
 
     const count = formattedMessages.length;
     const total = count;
@@ -162,6 +208,8 @@ router.post('/api/v1/message/text', optionalAuthenticateToken, async (req, res) 
       if (req.io) {
         req.io.to(chatGuid).emit('message.created', data);
       }
+
+      fireMessageSentWebhook(data);
 
       logger.info(`Message sent to chat ${chatGuid}: ${textStr.substring(0, 30)}...`);
 

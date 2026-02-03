@@ -12,6 +12,7 @@ import { getServerPassword } from './middleware/auth.js';
 import { subscribeToDaemonEvents } from './services/daemon-events.js';
 import { invalidateContactsCache } from './routes/contacts.js';
 import { toClientTimestamp } from './utils/dates.js';
+import { normalizeAttachments } from './utils/attachments.js';
 
 // Routes
 import authRoutes from './routes/auth.js';
@@ -173,7 +174,7 @@ const pollSwiftDaemon = async () => {
           dateCreated: toClientTimestamp(msgData.dateCreated) ?? Date.now(),
           isFromMe: msgData.isFromMe || false,
           type: msgData.type || 'text',
-          attachments: msgData.attachments || []
+          attachments: normalizeAttachments(msgData.attachments || [])
         };
 
         // Broadcast to chat room

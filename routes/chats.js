@@ -135,7 +135,7 @@ router.get('/api/v1/chats/:chatGuid', optionalAuthenticateToken, async (req, res
     const chat = findChatByGuid(chats, chatGuid);
 
     if (!chat) {
-      return sendError(res, 404, 'Chat not found', 'Not Found');
+      return sendError(res, 404, 'Chat does not exist!', 'Not Found');
     }
 
     sendSuccess(
@@ -178,22 +178,51 @@ router.get('/api/v1/chat', optionalAuthenticateToken, async (req, res) => {
 });
 
 /**
+ * Build a single message payload for API response (e.g. chat/new sent message).
+ * Matches BlueBubbles message shape; handleId is int? (number or null).
+ */
+function toSentMessagePayload(sentResult, chatGuid, text, opts = {}) {
+  const { tempGuid, subject = null } = opts;
+  const rawDate = sentResult?.dateCreated != null ? Number(sentResult.dateCreated) : null;
+  const dateCreated = rawDate != null ? (toClientTimestamp(rawDate) ?? Date.now()) : Date.now();
+  const payload = {
+    guid: sentResult?.guid ?? null,
+    text: text ?? '',
+    chatGuid,
+    handleId: null,
+    dateCreated,
+    dateRead: null,
+    isFromMe: true,
+    type: 'text',
+    subject,
+    error: 0,
+    attachments: [],
+    associatedMessageGuid: null,
+    associatedMessageType: null
+  };
+  if (tempGuid) payload.tempGuid = tempGuid;
+  return payload;
+}
+
+/**
  * POST /api/v1/chat/new
- * Create or find a chat by participant addresses. Must be before /api/v1/chat/:chatGuid so "new" is not matched as chatGuid.
- * Body: { addresses: string[], message?: string, service?: 'iMessage'|'SMS' }. Returns chat in BlueBubbles envelope.
+ * Create or find chat. Body: addresses (required), message, service, tempGuid, subject.
+ * Must be before /api/v1/chat/:chatGuid so "new" is not matched as chatGuid.
  */
 router.post('/api/v1/chat/new', optionalAuthenticateToken, async (req, res) => {
   try {
-    const { addresses = [], message, service } = req.body || {};
+    const body = req.body || {};
+    const { addresses = [], message, service = 'iMessage', tempGuid, subject } = body;
+
     let list = Array.isArray(addresses) ? addresses.map(a => String(a).trim()).filter(Boolean) : [];
-    // Allow single address via query ?guid=... when body has no addresses (client compatibility)
     if (list.length === 0 && req.query?.guid) {
       const guid = String(req.query.guid).trim();
       if (guid) list = [guid];
     }
     if (list.length === 0) {
-      return sendError(res, 400, 'addresses array is required and cannot be empty (or provide ?guid=...)', 'Bad Request');
+      return sendError(res, 400, 'No addresses provided!', 'Bad Request');
     }
+
     const serviceType = (service === 'SMS' || service === 'iMessage') ? service : 'iMessage';
     const firstAddress = list[0];
     const chats = await swiftDaemon.getChats();
@@ -203,14 +232,20 @@ router.post('/api/v1/chat/new', optionalAuthenticateToken, async (req, res) => {
       const addr = normalized.toLowerCase();
       return guid.includes(addr) || guid.endsWith(addr) || guid.endsWith(addr.replace(/^\+/, ''));
     });
+
     let chatGuid;
     let responseChat;
     if (chat) {
       chatGuid = chat.guid;
-      responseChat = toChatResponse(chat, { includeParticipants: true, includeLastMessage: true });
+      responseChat = toChatResponse(chat, {
+        includeParticipants: true,
+        includeLastMessage: true,
+        includeMessages: false
+      });
     } else {
       chatGuid = `${serviceType};-;${normalized}`;
       responseChat = {
+        originalROWID: 0,
         guid: chatGuid,
         style: list.length > 2 ? 43 : 0,
         chatIdentifier: normalized,
@@ -221,17 +256,27 @@ router.post('/api/v1/chat/new', optionalAuthenticateToken, async (req, res) => {
         properties: {},
         lastAddressedHandle: null,
         lastMessage: null,
-        participants: list.map(addr => ({ address: addr })),
-        originalROWID: 0 // int for client (Flutter int?)
+        participants: list.map(addr => ({ address: addr }))
       };
     }
-    if (message && String(message).trim()) {
+
+    const messageStr = message != null ? String(message).trim() : '';
+    if (messageStr) {
       try {
-        await swiftDaemon.sendMessage(chatGuid, String(message).trim());
+        const sentResult = await swiftDaemon.sendMessage(chatGuid, messageStr, {
+          tempGuid: tempGuid || undefined
+        });
+        responseChat.messages = [
+          toSentMessagePayload(sentResult, chatGuid, messageStr, { tempGuid, subject: subject || null })
+        ];
       } catch (sendErr) {
-        logger.warn(`chat/new: optional initial message send failed: ${sendErr.message}`);
+        logger.warn(`chat/new: initial message send failed: ${sendErr.message}`);
+        responseChat.messages = [];
       }
+    } else {
+      responseChat.messages = [];
     }
+
     sendSuccess(res, responseChat, 'Successfully created chat!');
   } catch (error) {
     logger.error(`Chat new error: ${error.message}`);
@@ -258,26 +303,56 @@ router.get('/api/v1/chat/count', optionalAuthenticateToken, async (req, res) => 
 
 /**
  * POST /api/v1/chat/query
+ * BlueBubbles-compatible: body.with (lastmessage, last-message, participants), body.guid (optional filter), body.sort, body.offset, body.limit.
  * Must be before /api/v1/chat/:chatGuid so "query" is not matched as chatGuid.
  */
 router.post('/api/v1/chat/query', optionalAuthenticateToken, async (req, res) => {
   try {
-    const { limit = 50, offset = 0, query = '' } = req.body || {};
-    const chats = await swiftDaemon.getChats();
-    const needle = String(query || '').toLowerCase();
-    let filtered = chats;
-    if (needle) {
-      filtered = chats.filter(chat => {
-        const display = (chat.displayName || '').toLowerCase();
-        const guid = (chat.guid || '').toLowerCase();
-        return display.includes(needle) || guid.includes(needle);
+    const body = req.body || {};
+    const withQuery = parseWithQuery(body.with);
+    const withLastMessage = withQuery.includes('lastmessage') || withQuery.includes('last-message');
+    const guid = body.guid != null ? String(body.guid).trim() : null;
+    // Official server: ChatSerializer default is includeParticipants: true for query
+    const includeParticipants = true;
+    let sort = body.sort != null ? String(body.sort).trim() : null;
+    const offsetRaw = body.offset != null ? parseInt(body.offset, 10) : 0;
+    const offset = Number.isNaN(offsetRaw) || offsetRaw < 0 ? 0 : offsetRaw;
+    const limitRaw = body.limit != null ? parseInt(body.limit, 10) : 1000;
+    const limit = Math.min(Math.max(Number.isNaN(limitRaw) ? 1000 : limitRaw, 1), 1000);
+
+    if (withLastMessage && !sort) sort = 'lastmessage';
+
+    let chats = await swiftDaemon.getChats();
+    if (guid) {
+      let chat = findChatByGuid(chats, guid);
+      if (!chat) chat = await swiftDaemon.getChat(guid).catch(() => null);
+      if (!chat) return sendError(res, 404, 'Chat does not exist!', 'Not Found');
+      chats = [chat];
+    }
+
+    const total = chats.length;
+    const sliced = chats.slice(offset, offset + limit);
+    const results = sliced.map(chat =>
+      toChatResponse(chat, {
+        includeParticipants,
+        includeLastMessage: withLastMessage,
+        includeMessages: false
+      })
+    );
+
+    if (sort === 'lastmessage' && withLastMessage) {
+      results.sort((a, b) => {
+        const d1 = a.lastMessage?.dateCreated ?? 0;
+        const d2 = b.lastMessage?.dateCreated ?? 0;
+        if (d1 > d2) return -1;
+        if (d1 < d2) return 1;
+        return 0;
       });
     }
 
-    const sliced = filtered.slice(offset, offset + limit).map(chat => toChatResponse(chat));
-    sendSuccess(res, sliced, 'Success', 200, {
-      count: sliced.length,
-      total: filtered.length,
+    sendSuccess(res, results, 'Success', 200, {
+      count: results.length,
+      total,
       offset,
       limit
     });
@@ -318,7 +393,7 @@ router.get('/api/v1/chat/:chatGuid', optionalAuthenticateToken, async (req, res)
     }
 
     if (!chat) {
-      return sendError(res, 404, 'Chat not found', 'Not Found');
+      return sendError(res, 404, 'Chat does not exist!', 'Not Found');
     }
 
     sendSuccess(

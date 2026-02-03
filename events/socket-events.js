@@ -14,6 +14,7 @@ import {
   ErrorTypes
 } from '../utils/socket-response.js';
 import { toClientTimestamp } from '../utils/dates.js';
+import { normalizeAttachments } from '../utils/attachments.js';
 
 const VCF_PATH = path.join(process.cwd(), 'data', 'AddressBook.vcf');
 
@@ -73,7 +74,7 @@ const toMessageResponse = (msg, chatGuid, chats = null) => ({
   handleId: 0,
   otherHandle: 0,
   chats: chats || undefined,
-  attachments: msg.attachments || [],
+  attachments: normalizeAttachments(msg.attachments || []),
   subject: msg.subject || '',
   error: 0,
   dateCreated: toClientTimestamp(msg.dateCreated) ?? Date.now(),
@@ -294,6 +295,7 @@ export const registerSocketEvents = (socket, socketManager) => {
     const tempGuid = params?.tempGuid;
     const message = params?.message;
     const attachmentPaths = Array.isArray(params?.attachmentPaths) ? params.attachmentPaths.filter(Boolean) : [];
+    logger.info(`[send-message] Attempting send chatGuid=${chatGuid ?? '(missing)'} tempGuid=${tempGuid ?? '(missing)'} textLen=${(message || '').length} attachments=${attachmentPaths.length}`);
     if (!chatGuid) {
       return respond(cb, 'error', createBadRequestResponse('No chat GUID provided'));
     }
@@ -338,9 +340,11 @@ export const registerSocketEvents = (socket, socketManager) => {
       msg.tempGuid = tempGuid;
       msg.guid = sentMessage.guid;
       sendCache.remove(tempGuid);
+      logger.info(`[send-message] Success chatGuid=${chatGuid} tempGuid=${tempGuid} guid=${sentMessage.guid}`);
       return respond(cb, 'message-sent', createSuccessResponse(msg));
     } catch (error) {
       sendCache.remove(tempGuid);
+      logger.error(`[send-message] Failed chatGuid=${chatGuid} tempGuid=${tempGuid} error=${error?.message ?? error}`);
       const errorData = {
         ...toMessageResponse(
           {
@@ -360,7 +364,7 @@ export const registerSocketEvents = (socket, socketManager) => {
         cb,
         'message-send-error',
         createServerErrorResponse(
-          error.message,
+          error?.message ?? String(error),
           ErrorTypes.IMESSAGE_ERROR,
           'Failed to send message! See attached message error code.',
           errorData

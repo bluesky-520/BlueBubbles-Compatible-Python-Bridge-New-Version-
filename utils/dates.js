@@ -27,3 +27,15 @@ export function toClientTimestamp(value) {
   if (v > 0) return Math.round(v / 1e6 + UNIX_EPOCH_2001_MS);
   return null;
 }
+
+/**
+ * Convert milliseconds since Unix epoch to Apple Messages date (nanoseconds since 2001-01-01).
+ * Used when sending "before" to the daemon, which compares against message.date in the DB.
+ * @param {number} unixMs - Milliseconds since Unix epoch
+ * @returns {number} Nanoseconds since 2001-01-01
+ */
+export function unixMsToAppleNs(unixMs) {
+  if (unixMs == null || !Number.isFinite(unixMs)) return 0;
+  const msSince2001 = Math.max(0, unixMs - UNIX_EPOCH_2001_MS);
+  return Math.round(msSince2001 * 1e6);
+}
