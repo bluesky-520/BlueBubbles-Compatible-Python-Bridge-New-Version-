@@ -323,13 +323,12 @@ router.get('/api/v1/message/count', optionalAuthenticateToken, async (req, res) 
 });
 
 /**
- * GET /api/v1/attachment/:guid
- * Proxy attachment file from Swift daemon.
+ * Stream attachment from Swift daemon (shared for :guid and :guid/download).
  */
-router.get('/api/v1/attachment/:guid', optionalAuthenticateToken, async (req, res) => {
+async function streamAttachmentByGuid(req, res, guid) {
+  if (!guid) return sendError(res, 400, 'Attachment GUID required', 'Bad Request');
+  logger.debug(`Attachment download requested: guid=${guid}`);
   try {
-    const { guid } = req.params;
-    if (!guid) return sendError(res, 400, 'Attachment GUID required', 'Bad Request');
     const response = await swiftDaemon.getAttachmentStream(guid);
     const contentType = response.headers['content-type'];
     const contentDisposition = response.headers['content-disposition'];
@@ -338,11 +337,28 @@ router.get('/api/v1/attachment/:guid', optionalAuthenticateToken, async (req, re
     response.data.pipe(res);
   } catch (error) {
     if (error?.response?.status === 404) {
+      logger.warn(`Attachment not found from daemon: guid=${guid}`);
       return res.status(404).json({ status: 404, message: 'Attachment not found' });
     }
-    logger.error(`Attachment proxy error: ${error.message}`);
+    logger.error(`Attachment proxy error for guid=${guid}: ${error.message}`);
     sendError(res, 500, error.message);
   }
+}
+
+/**
+ * GET /api/v1/attachment/:guid/download
+ * Official BlueBubbles clients use this path (query: original, guid/password). Register before :guid.
+ */
+router.get('/api/v1/attachment/:guid/download', optionalAuthenticateToken, async (req, res) => {
+  await streamAttachmentByGuid(req, res, req.params.guid);
+});
+
+/**
+ * GET /api/v1/attachment/:guid
+ * Proxy attachment file from Swift daemon.
+ */
+router.get('/api/v1/attachment/:guid', optionalAuthenticateToken, async (req, res) => {
+  await streamAttachmentByGuid(req, res, req.params.guid);
 });
 
 export default router;

@@ -153,7 +153,12 @@ io.on('connection', (socket) => {
 });
 
 // Background polling for Swift daemon updates
+// Keep lastCheckTime in Unix ms to avoid JS precision loss (Apple ns exceeds MAX_SAFE_INTEGER)
 let lastCheckTime = Date.now();
+
+// Dedupe: skip re-emitting the same message (belt-and-suspenders for edge cases)
+const recentlyEmittedGuids = new Set();
+const MAX_EMITTED_CACHE = 1000;
 
 const pollSwiftDaemon = async () => {
   try {
@@ -164,23 +169,29 @@ const pollSwiftDaemon = async () => {
     // Emit new messages
     for (const msgData of messages) {
       const chatGuid = msgData.chatGuid;
-      if (chatGuid) {
-        const messagePayload = {
-          guid: msgData.guid,
-          text: msgData.text,
-          chatGuid: chatGuid,
-          sender: msgData.sender || 'Unknown',
-          handleId: msgData.handleId || '',
-          dateCreated: toClientTimestamp(msgData.dateCreated) ?? Date.now(),
-          isFromMe: msgData.isFromMe || false,
-          type: msgData.type || 'text',
-          attachments: normalizeAttachments(msgData.attachments || [])
-        };
+      if (!chatGuid) continue;
 
-        // Broadcast to chat room
-        socketManager.broadcastToChat(chatGuid, 'message.created', messagePayload);
-        logger.info(`Emitted new message to room ${chatGuid}: ${msgData.guid}`);
+      // Skip if we already emitted this message (prevents duplicate emissions)
+      if (recentlyEmittedGuids.has(msgData.guid)) continue;
+      recentlyEmittedGuids.add(msgData.guid);
+      if (recentlyEmittedGuids.size > MAX_EMITTED_CACHE) {
+        recentlyEmittedGuids.clear();
       }
+
+      const messagePayload = {
+        guid: msgData.guid,
+        text: msgData.text,
+        chatGuid: chatGuid,
+        sender: msgData.sender || 'Unknown',
+        handleId: msgData.handleId || '',
+        dateCreated: toClientTimestamp(msgData.dateCreated) ?? Date.now(),
+        isFromMe: msgData.isFromMe || false,
+        type: msgData.type || 'text',
+        attachments: normalizeAttachments(msgData.attachments || [])
+      };
+
+      socketManager.broadcastToChat(chatGuid, 'message.created', messagePayload);
+      logger.info(`Emitted new message to room ${chatGuid}: ${msgData.guid}`);
     }
 
     // Emit typing indicators
@@ -202,12 +213,13 @@ const pollSwiftDaemon = async () => {
       }
     }
 
-    // Update last check time
+    // Update last check time (use Unix ms to avoid precision loss; Apple ns > MAX_SAFE_INTEGER)
     if (messages.length > 0) {
-      lastCheckTime = Math.max(
-        ...messages.map(msg => msg.dateCreated || 0),
+      const maxUnixMs = Math.max(
+        ...messages.map(msg => toClientTimestamp(msg.dateCreated) ?? 0),
         lastCheckTime
       );
+      lastCheckTime = maxUnixMs;
     }
   } catch (error) {
     if (error.message !== 'Request failed with status code 404') {
