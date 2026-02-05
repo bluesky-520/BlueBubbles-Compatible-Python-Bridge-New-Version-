@@ -49,21 +49,6 @@ export const createBadRequestResponse = (message) => ({
   error: { type: ErrorTypes.VALIDATION_ERROR, message }
 });
 
-export const createUnauthorizedResponse = () => ({
-  status: 401,
-  message: ResponseMessages.UNAUTHORIZED
-});
-
-export const createForbiddenResponse = () => ({
-  status: 403,
-  message: ResponseMessages.FORBIDDEN
-});
-
-export const createNotFoundResponse = (message = ResponseMessages.NOT_FOUND) => ({
-  status: 404,
-  message
-});
-
 export const createNoDataResponse = () => ({
   status: 200,
   message: ResponseMessages.NO_DATA

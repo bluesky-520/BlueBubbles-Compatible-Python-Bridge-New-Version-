@@ -1,4 +1,5 @@
 import axios from 'axios';
+import path from 'path';
 import logger from '../config/logger.js';
 
 /**
@@ -141,7 +142,8 @@ class SwiftDaemonClient {
         text: text || ''
       };
       if (Array.isArray(opts.attachmentPaths) && opts.attachmentPaths.length) {
-        body.attachment_paths = opts.attachmentPaths;
+        body.attachment_paths = opts.attachmentPaths.map((p) => path.resolve(p));
+        logger.info(`Sending to daemon with attachment_paths: ${body.attachment_paths.join(', ')}`);
       }
       if (opts.tempGuid) body.temp_guid = opts.tempGuid;
       const response = await this.axios.post('/send', body);
@@ -214,16 +216,68 @@ class SwiftDaemonClient {
   }
 
   /**
-   * Fetch attachment file from Swift daemon (stream). Returns response with responseType 'stream'.
+   * Get attachment metadata from Swift daemon (GET /attachments/:guid/info).
    * @param {string} guid - Attachment GUID
+   * @returns {Promise<Object|null>} Attachment metadata or null if not found
+   */
+  async getAttachmentInfo(guid) {
+    try {
+      const response = await this.axios.get(`/attachments/${encodeURIComponent(guid)}/info`);
+      return response.data;
+    } catch (error) {
+      if (error?.response?.status === 404) return null;
+      logger.error(`Failed to fetch attachment info ${guid}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch attachment file from Swift daemon (stream). Returns response with responseType 'stream'.
+   * Forwards query params (e.g. original, height, width, quality) for official API compatibility.
+   * @param {string} guid - Attachment GUID
+   * @param {Object} [query] - Optional query params to forward
+   * @param {Object} [opts]
+   * @param {Object} [opts.headers] - Optional headers to pass through (e.g. Range)
    * @returns {Promise<Object>} Axios response with response.data as stream
    */
-  async getAttachmentStream(guid) {
+  async getAttachmentStream(guid, query = {}, opts = {}) {
     const response = await this.axios.get(`/attachments/${encodeURIComponent(guid)}`, {
       responseType: 'stream',
-      timeout: 60000
+      timeout: 60000,
+      params: query,
+      headers: opts?.headers || undefined
     });
     return response;
+  }
+
+  /**
+   * Fetch attachment as buffer (for socket get-attachment with loadData).
+   * @param {string} guid - Attachment GUID
+   * @returns {Promise<Buffer>} File bytes
+   */
+  async getAttachmentBuffer(guid) {
+    const response = await this.axios.get(`/attachments/${encodeURIComponent(guid)}`, {
+      responseType: 'arraybuffer',
+      timeout: 60000
+    });
+    return Buffer.from(response.data);
+  }
+
+  /**
+   * Fetch attachment chunk (Range request) for socket get-attachment-chunk.
+   * @param {string} guid - Attachment GUID
+   * @param {number} start - Byte start
+   * @param {number} chunkSize - Number of bytes
+   * @returns {Promise<Buffer>} Chunk bytes
+   */
+  async getAttachmentChunk(guid, start, chunkSize) {
+    const end = start + chunkSize - 1;
+    const response = await this.axios.get(`/attachments/${encodeURIComponent(guid)}`, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+      headers: { Range: `bytes=${start}-${end}` }
+    });
+    return Buffer.from(response.data);
   }
 
   /**

@@ -3,6 +3,9 @@
  * Matches official server AttachmentSerializer / AttachmentResponse shape.
  */
 
+import path from 'path';
+import os from 'os';
+
 /**
  * Parse BlueBubbles "with" query param (comma-separated; can be URL-encoded).
  * Returns true if client requested attachment(s).
@@ -50,4 +53,25 @@ export function normalizeAttachment(a) {
 export function normalizeAttachments(arr) {
   if (!Array.isArray(arr)) return [];
   return arr.map(normalizeAttachment).filter(Boolean);
+}
+
+/**
+ * Official BlueBubbles "private-api" attachment directory.
+ * This is where the official server stores uploaded attachments:
+ * ~/Library/Messages/Attachments/BlueBubbles
+ */
+export function getPrivateApiDir() {
+  return path.join(os.homedir(), 'Library', 'Messages', 'Attachments', 'BlueBubbles');
+}
+
+/**
+ * Resolve attachment paths provided by clients.
+ * - If path is absolute, keep it.
+ * - If path is relative (e.g. "uuid/filename"), resolve under the private-api dir.
+ */
+export function resolveAttachmentPaths(paths, rootDir = getPrivateApiDir()) {
+  if (!Array.isArray(paths)) return [];
+  return paths
+    .filter(Boolean)
+    .map((p) => (path.isAbsolute(p) ? p : path.normalize(path.join(rootDir, p))));
 }

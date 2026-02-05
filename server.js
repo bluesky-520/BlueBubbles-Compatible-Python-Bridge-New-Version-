@@ -59,21 +59,43 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1024mb' }));
 
-// Request logging
-app.use((req, res, next) => {
-  const startedAt = Date.now();
-  const { method } = req;
-  const url = req.originalUrl || req.url;
+const LOG_REQUESTS = String(process.env.LOG_REQUESTS ?? 'true').toLowerCase() === 'true';
+const LOG_SOCKET_EVENTS = String(process.env.LOG_SOCKET_EVENTS ?? 'false').toLowerCase() === 'true';
 
-  res.on('finish', () => {
-    const durationMs = Date.now() - startedAt;
-    const status = res.statusCode;
-    const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown';
-    logger.info(`${method} ${url} ${status} ${durationMs}ms - ${ip}`);
+// Request logging (BlueBubbles-like; redacts auth query params)
+if (LOG_REQUESTS) {
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    const { method } = req;
+    const url = req.originalUrl || req.url;
+    const routePath = (url && url.split('?')[0]) || url;
+    const urlParams = (() => {
+      const q = req.query && Object.keys(req.query).length ? req.query : {};
+      const sensitiveKeys = new Set(['guid', 'password', 'token', 'authorization', 'auth']);
+      const redacted = {};
+      for (const [k, v] of Object.entries(q)) {
+        if (sensitiveKeys.has(String(k).toLowerCase())) {
+          redacted[k] = '[REDACTED]';
+        } else {
+          redacted[k] = v;
+        }
+      }
+      return redacted;
+    })();
+    logger.info(`Incoming: ${method} ${routePath}`);
+    logger.debug(`Request to ${routePath} (URL Params: ${JSON.stringify(urlParams)})`);
+
+    res.on('finish', () => {
+      const durationMs = Date.now() - startedAt;
+      const status = res.statusCode;
+      const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown';
+      logger.debug(`Request to ${routePath} took ${durationMs} ms`);
+      logger.info(`${method} ${url} ${status} ${durationMs}ms - ${ip}`);
+    });
+
+    next();
   });
-
-  next();
-});
+}
 
 // Make io available to routes
 app.use((req, res, next) => {
@@ -149,6 +171,15 @@ io.on('connection', (socket) => {
   });
 
   socketManager.handleConnection(socket);
+  // Optional: very verbose socket event logging (off by default; can leak sensitive payloads)
+  if (LOG_SOCKET_EVENTS) {
+    socket.onAny((eventName, ...args) => {
+      const payload = args.length
+        ? (typeof args[0] === 'object' ? JSON.stringify(args[0]).slice(0, 200) : String(args[0]).slice(0, 100))
+        : '';
+      logger.info(`Socket event: ${eventName} ${payload ? ` ${payload}${payload.length >= 200 ? '...' : ''}` : ''}`);
+    });
+  }
   registerSocketEvents(socket, socketManager);
 });
 
@@ -183,14 +214,23 @@ const pollSwiftDaemon = async () => {
         text: msgData.text,
         chatGuid: chatGuid,
         sender: msgData.sender || 'Unknown',
-        handleId: msgData.handleId || '',
+        handleId: (() => {
+          const n = Number(msgData.handleId);
+          return Number.isFinite(n) ? n : 0;
+        })(),
         dateCreated: toClientTimestamp(msgData.dateCreated) ?? Date.now(),
+        dateRead: toClientTimestamp(msgData.dateRead) ?? null,
         isFromMe: msgData.isFromMe || false,
         type: msgData.type || 'text',
-        attachments: normalizeAttachments(msgData.attachments || [])
+        subject: msgData.subject || null,
+        error: msgData.error != null ? Number(msgData.error) : 0,
+        attachments: normalizeAttachments(msgData.attachments || []),
+        associatedMessageGuid: msgData.associatedMessageGuid || null,
+        associatedMessageType: msgData.associatedMessageType || null
       };
 
       socketManager.broadcastToChat(chatGuid, 'message.created', messagePayload);
+      socketManager.broadcastToChat(chatGuid, 'new-message', messagePayload);
       logger.info(`Emitted new message to room ${chatGuid}: ${msgData.guid}`);
     }
 
@@ -250,29 +290,35 @@ process.on('SIGINT', () => {
 
 // Start server
 const PORT = process.env.PORT || 8000;
+const daemonUrl = swiftDaemon.axios?.defaults?.baseURL || process.env.SWIFT_DAEMON_URL || 'http://localhost:8081';
 
-// Health check Swift daemon before starting
-logger.info('Checking Swift daemon connection...');
+function logStartupBanner(daemonReachable) {
+  const daemonStatus = daemonReachable
+    ? `✓ Reachable at ${daemonUrl}`
+    : `⚠ Not reachable (will retry on demand) - ${daemonUrl}`;
+  logger.info(`
+╔═══════════════════════════════════════════════════════════╗
+║  BlueBubbles Bridge Started Successfully                   ║
+║                                                           ║
+║  HTTP Server:    http://localhost:${String(PORT).padEnd(4)}                      ║
+║  Socket.IO:      ws://localhost:${String(PORT).padEnd(4)}                      ║
+║  Swift Daemon:   ${daemonStatus.padEnd(47)}║
+║                                                           ║
+║  Ready for BlueBubbles Android client                      ║
+╚═══════════════════════════════════════════════════════════╝
+`);
+}
+
+// Health check Swift daemon, then start server and show status
 swiftDaemon.ping()
   .then(connected => {
-    if (connected) {
-      logger.info('✓ Swift daemon is reachable');
-    } else {
-      logger.warn('⚠ Swift daemon not reachable (will retry on demand)');
-    }
-
     server.listen(PORT, () => {
-      logger.info(`🚀 BlueBubbles Bridge server running on port ${PORT}`);
-      logger.info(`📡 Socket.IO endpoint: ws://localhost:${PORT}`);
-      logger.info(`📱 Ready for BlueBubbles Android client`);
+      logStartupBanner(connected);
     });
   })
   .catch(error => {
-    logger.error(`Failed to check Swift daemon: ${error.message}`);
-    logger.warn('Starting server anyway (Swift daemon may connect later)');
-    
+    logger.debug(`Swift daemon ping failed: ${error.message}`);
     server.listen(PORT, () => {
-      logger.info(`🚀 BlueBubbles Bridge server running on port ${PORT}`);
-      logger.info(`⚠️  Swift daemon not reachable - check if it's running on port 8081`);
+      logStartupBanner(false);
     });
-});
+  });

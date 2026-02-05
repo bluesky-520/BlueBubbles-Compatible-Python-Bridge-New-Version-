@@ -70,6 +70,19 @@ export const authenticateToken = (req, res, next) => {
  * Query params only: ?password=xxx or ?guid=xxx
  */
 export const optionalAuthenticateToken = (req, res, next) => {
+  // Support Bearer JWT as an alternative auth method (some clients use Authorization for media downloads).
+  try {
+    const authHeader = req.headers?.authorization;
+    if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      const decoded = jwt.verify(token, JWT_SECRET);
+      req.user = decoded;
+      return next();
+    }
+  } catch (e) {
+    // Fall through to query-password auth
+  }
+
   const password = getServerPassword();
   if (!password) {
     logger.error('Server password not configured');

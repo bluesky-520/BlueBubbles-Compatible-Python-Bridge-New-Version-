@@ -19,12 +19,13 @@ export function toClientTimestamp(value) {
   if (!Number.isFinite(v)) return null;
   // Apple Messages: nanoseconds since 2001-01-01
   if (v > 1e15) {
-    return Math.round(v / 1e6 + UNIX_EPOCH_2001_MS);
+    // Use truncation (not rounding) to keep pagination boundaries stable.
+    return Math.trunc(v / 1e6 + UNIX_EPOCH_2001_MS);
   }
   // Already milliseconds (e.g. 13 digits, 1e12–1e14)
-  if (v >= 1e12 && v <= 8640000000000000) return Math.round(v);
+  if (v >= 1e12 && v <= 8640000000000000) return Math.trunc(v);
   // Fallback: assume nanoseconds since 2001
-  if (v > 0) return Math.round(v / 1e6 + UNIX_EPOCH_2001_MS);
+  if (v > 0) return Math.trunc(v / 1e6 + UNIX_EPOCH_2001_MS);
   return null;
 }
 
@@ -37,5 +38,6 @@ export function toClientTimestamp(value) {
 export function unixMsToAppleNs(unixMs) {
   if (unixMs == null || !Number.isFinite(unixMs)) return 0;
   const msSince2001 = Math.max(0, unixMs - UNIX_EPOCH_2001_MS);
-  return Math.round(msSince2001 * 1e6);
+  // Truncate to avoid rounding up across page boundaries.
+  return Math.trunc(msSince2001 * 1e6);
 }
