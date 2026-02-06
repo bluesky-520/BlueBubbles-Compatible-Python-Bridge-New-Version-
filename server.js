@@ -12,7 +12,7 @@ import { getServerPassword } from './middleware/auth.js';
 import { subscribeToDaemonEvents } from './services/daemon-events.js';
 import { invalidateContactsCache } from './routes/contacts.js';
 import { toClientTimestamp } from './utils/dates.js';
-import { normalizeAttachments } from './utils/attachments.js';
+import { toMessageResponse } from './utils/messages.js';
 
 // Routes
 import authRoutes from './routes/auth.js';
@@ -209,25 +209,7 @@ const pollSwiftDaemon = async () => {
         recentlyEmittedGuids.clear();
       }
 
-      const messagePayload = {
-        guid: msgData.guid,
-        text: msgData.text,
-        chatGuid: chatGuid,
-        sender: msgData.sender || 'Unknown',
-        handleId: (() => {
-          const n = Number(msgData.handleId);
-          return Number.isFinite(n) ? n : 0;
-        })(),
-        dateCreated: toClientTimestamp(msgData.dateCreated) ?? Date.now(),
-        dateRead: toClientTimestamp(msgData.dateRead) ?? null,
-        isFromMe: msgData.isFromMe || false,
-        type: msgData.type || 'text',
-        subject: msgData.subject || null,
-        error: msgData.error != null ? Number(msgData.error) : 0,
-        attachments: normalizeAttachments(msgData.attachments || []),
-        associatedMessageGuid: msgData.associatedMessageGuid || null,
-        associatedMessageType: msgData.associatedMessageType || null
-      };
+      const messagePayload = toMessageResponse(msgData, chatGuid);
 
       socketManager.broadcastToChat(chatGuid, 'message.created', messagePayload);
       socketManager.broadcastToChat(chatGuid, 'new-message', messagePayload);

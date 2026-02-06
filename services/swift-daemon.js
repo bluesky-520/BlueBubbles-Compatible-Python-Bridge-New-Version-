@@ -1,6 +1,6 @@
 import axios from 'axios';
-import path from 'path';
 import logger from '../config/logger.js';
+import { resolveAttachmentPaths } from '../utils/attachments.js';
 
 /**
  * IPC Client to communicate with Swift daemon
@@ -142,7 +142,7 @@ class SwiftDaemonClient {
         text: text || ''
       };
       if (Array.isArray(opts.attachmentPaths) && opts.attachmentPaths.length) {
-        body.attachment_paths = opts.attachmentPaths.map((p) => path.resolve(p));
+        body.attachment_paths = resolveAttachmentPaths(opts.attachmentPaths);
         logger.info(`Sending to daemon with attachment_paths: ${body.attachment_paths.join(', ')}`);
       }
       if (opts.tempGuid) body.temp_guid = opts.tempGuid;

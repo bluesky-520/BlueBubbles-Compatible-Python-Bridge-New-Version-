@@ -16,7 +16,8 @@ import {
   ErrorTypes
 } from '../utils/socket-response.js';
 import { toClientTimestamp, unixMsToAppleNs } from '../utils/dates.js';
-import { normalizeAttachments, normalizeAttachment, resolveAttachmentPaths, getPrivateApiDir } from '../utils/attachments.js';
+import { normalizeAttachment, resolveAttachmentPaths, getPrivateApiDir } from '../utils/attachments.js';
+import { toMessageResponse } from '../utils/messages.js';
 
 const VCF_PATH = path.resolve(process.cwd(), 'data', 'AddressBook.vcf');
 
@@ -148,32 +149,6 @@ const toChatResponse = (chat) => {
     groupId: ''
   };
 };
-
-const toMessageResponse = (msg, chatGuid, chats = null) => ({
-  originalROWID: 0,
-  tempGuid: msg.tempGuid || undefined,
-  guid: msg.guid,
-  text: msg.text || '',
-  handle: null,
-  handleId: 0,
-  otherHandle: 0,
-  chats: chats || undefined,
-  attachments: normalizeAttachments(msg.attachments || []),
-  subject: msg.subject || '',
-  error: 0,
-  dateCreated: toClientTimestamp(msg.dateCreated) ?? Date.now(),
-  dateRead: toClientTimestamp(msg.dateRead) ?? null,
-  dateDelivered: null,
-  isFromMe: msg.isFromMe || false,
-  isArchived: false,
-  itemType: 0,
-  groupTitle: null,
-  groupActionType: 0,
-  balloonBundleId: null,
-  associatedMessageGuid: msg.associatedMessageGuid || null,
-  associatedMessageType: msg.associatedMessageType || null,
-  chatGuid
-});
 
 /** Parse optional numeric input from socket params. */
 function parseOptionalNum(val) {
