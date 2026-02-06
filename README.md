@@ -24,15 +24,28 @@ Copy `.env.example` to `.env` and set `PORT`, `SWIFT_DAEMON_URL`, `SERVER_PASSWO
 
 ## Configuration
 
-| Variable           | Default                     | Description                |
-|--------------------|-----------------------------|----------------------------|
-| `PORT`             | `8000`                      | HTTP server port           |
-| `SWIFT_DAEMON_URL` | `http://localhost:8081`     | Swift daemon base URL      |
-| `CORS_ORIGIN`      | `*`                         | CORS allowed origin        |
-| `SERVER_PASSWORD`  | (none)                      | Password for `POST /api/v1/auth` |
-| `JWT_SECRET`       | `your-secret-key-change-this` | Signing key for JWT     |
-| `JWT_EXPIRES_IN`   | `7d`                        | Token expiry               |
-| `NODE_ENV`         | —                           | `production` lowers logs   |
+| Variable              | Default                     | Description                |
+|-----------------------|-----------------------------|----------------------------|
+| `PORT`                | `8000`                      | HTTP server port           |
+| `SWIFT_DAEMON_URL`    | `http://localhost:8081`     | Swift daemon base URL      |
+| `CORS_ORIGIN`         | `*`                         | CORS allowed origin        |
+| `SERVER_PASSWORD`     | (none)                      | Server password (aliases: `PASSWORD`, `SOCKET_PASSWORD`) |
+| `JWT_SECRET`          | `your-secret-key-change-this` | Signing key for JWT     |
+| `JWT_EXPIRES_IN`      | `7d`                        | Token expiry               |
+| `LOG_LEVEL`           | `info`                      | Log level (`debug`, `info`, `warn`, `error`) |
+| `LOG_REQUESTS`        | `true`                      | Log HTTP requests (redacts auth query params) |
+| `LOG_SOCKET_EVENTS`   | `false`                     | Very verbose Socket.IO event logging |
+| `LOG_SSE_HEALTH`      | `true`                      | Log SSE health/polling transitions |
+| `LOG_SSE_RECONNECTS`  | `true`                      | Log SSE reconnect attempts |
+| `POLL_INTERVAL_MS`    | `1000`                      | Poll Swift daemon when SSE is unhealthy |
+| `SSE_IDLE_TIMEOUT_MS` | `5000`                      | Idle time before SSE is considered unhealthy |
+| `SSE_WATCHDOG_INTERVAL_MS` | `1000`                | SSE health watchdog interval |
+| `ATTACHMENT_DELETE_DELAY_MS` | `600000`           | Delay before deleting temp attachment files |
+| `N8N_WEBHOOK_URL`     | (none)                      | Fire-and-forget webhook on send |
+| `WEBHOOK_MESSAGE_SENT_URL` | (none)                 | Alias for `N8N_WEBHOOK_URL` |
+| `ENCRYPT_COMS` / `ENCRYPT_COMMS` | `false`         | Enable Socket.IO payload encryption |
+| `SOCKET_ENCRYPTION_KEY` | (none)                    | Socket.IO encryption key (fallbacks to server password) |
+| `NODE_ENV`            | —                           | Kept for compatibility     |
 
 ## Run
 
@@ -62,6 +75,14 @@ Pass the password as a query parameter on every request:
 ```bash
 curl "http://localhost:8000/api/v1/server/ping?password=mysecret"
 curl "http://localhost:8000/api/v1/chats?password=mysecret"
+```
+
+### JWT (optional)
+
+You can also use `Authorization: Bearer <token>` for API requests (handy for media downloads):
+
+```bash
+curl -H "Authorization: Bearer <token>" "http://localhost:8000/api/v1/attachment/<guid>/download"
 ```
 
 ### Protected Routes
@@ -107,10 +128,22 @@ Base URL: **`http://localhost:8000/api/v1`**
 |--------|------|-------------|---------------|
 | GET | `/chat/:chatGuid/message` | Messages for chat. Query: `limit` (1–1000, default 50), `offset`, `before`, `after`, `sort` (ASC/DESC). Returns 404 if chat not found. | ✅ |
 | POST | `/message/text` | Send text. Body: `{ chatGuid, text, tempGuid?, attachmentPaths? }` | ✅ |
-| GET | `/message/count` | Message count. Query: `chatGuid` | ✅ |
-| GET | `/attachment/:guid` | Stream attachment by GUID | ✅ |
+| POST | `/message/attachment` | Send attachment (multipart `attachment`, body `chatGuid`, `tempGuid?`) | ✅ |
 | POST | `/typing-indicator` | Body: `{ chatGuid, isTyping }` | ✅ |
 | POST | `/read_receipt` | Body: `{ chatGuid, messageGuids }` | ✅ |
+| GET | `/message/count` | Count messages since `after` (Unix ms). Query: `after` | ✅ |
+
+### Attachments
+
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/attachment/count` | Attachment count | ✅ |
+| POST | `/attachment/upload` | Upload file (multipart `attachment`) for later send | ✅ |
+| GET | `/attachment/:guid` | Attachment metadata | ✅ |
+| GET | `/attachment/:guid/download` | Stream attachment file (supports Range) | ✅ |
+| GET | `/attachment/:guid/download/force` | Force download (same stream as download) | ✅ |
+| GET | `/attachment/:guid/blurhash` | Unsupported in bridge (returns 404) | ✅ |
+| GET | `/attachment/:guid/live` | Unsupported in bridge (returns 404) | ✅ |
 
 ### Contacts
 
@@ -120,7 +153,7 @@ Base URL: **`http://localhost:8000/api/v1`**
 | GET | `/contacts/vcf` | Contacts as vCard | ✅ |
 | GET | `/contact` | Single contact (query) | ✅ |
 | GET | `/icloud/contact` | iCloud contact placeholder | ✅ |
-| POST | `/contacts/query` | Body: `{ address }` etc. | ✅ |
+| POST | `/contacts/query` | Body: `{ addresses: [...] }` | ✅ |
 | POST | `/contact/query` | Contact query | ✅ |
 
 ### Handle & FCM
@@ -133,6 +166,13 @@ Base URL: **`http://localhost:8000/api/v1`**
 | POST | `/fcm/device` | FCM device placeholder | ✅ |
 
 Responses use envelope format: `{ status, message, data?, metadata?, error? }`.
+
+## Health
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Basic health status |
+| GET | `/health/sse` | SSE/polling health metrics |
 
 ## Socket.IO
 

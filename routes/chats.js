@@ -2,7 +2,7 @@ import express from 'express';
 import swiftDaemon from '../services/swift-daemon.js';
 import { optionalAuthenticateToken } from '../middleware/auth.js';
 import logger from '../config/logger.js';
-import { sendSuccess, sendError } from '../utils/envelope.js';
+import { sendSuccess, sendError, sendBlueBubblesError, BLUEBUBBLES_ERROR_TYPES } from '../utils/envelope.js';
 import { toClientTimestamp } from '../utils/dates.js';
 
 const router = express.Router();
@@ -176,6 +176,40 @@ router.get('/api/v1/chat', optionalAuthenticateToken, async (req, res) => {
     sendError(res, 500, error.message);
   }
 });
+
+/**
+ * GET /api/v1/chat/:chatGuid/icon
+ * GET /api/v1/chats/:chatGuid/icon
+ * Matches official server: group icon only; 404 if chat missing or no icon.
+ */
+const chatIconHandler = async (req, res) => {
+  try {
+    const { chatGuid } = req.params;
+    const queryGuid = req.query?.guid ? String(req.query.guid).trim() : null;
+    let chat = null;
+    const chats = await swiftDaemon.getChats();
+    chat = findChatByGuid(chats, chatGuid);
+    if (!chat && queryGuid) {
+      chat = findChatByGuid(chats, queryGuid);
+    }
+    if (!chat) {
+      return sendBlueBubblesError(res, 404, 'Chat does not exist!', {
+        type: BLUEBUBBLES_ERROR_TYPES.DATABASE_ERROR
+      });
+    }
+    return sendBlueBubblesError(res, 404, 'Unable to find icon for the selected chat', {
+      type: BLUEBUBBLES_ERROR_TYPES.DATABASE_ERROR
+    });
+  } catch (error) {
+    logger.warn(`Chat icon error: ${error.message}`);
+    return sendBlueBubblesError(res, 404, 'Unable to find icon for the selected chat', {
+      type: BLUEBUBBLES_ERROR_TYPES.DATABASE_ERROR
+    });
+  }
+};
+
+router.get('/api/v1/chat/:chatGuid/icon', optionalAuthenticateToken, chatIconHandler);
+router.get('/api/v1/chats/:chatGuid/icon', optionalAuthenticateToken, chatIconHandler);
 
 /**
  * Build a single message payload for API response (e.g. chat/new sent message).

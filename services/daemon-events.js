@@ -3,6 +3,7 @@ import logger from '../config/logger.js';
 const DEFAULT_BASE_URL = process.env.SWIFT_DAEMON_URL || 'http://localhost:8081';
 const RECONNECT_MS = 5000;
 const POLL_INTERVAL_MS = 5000;
+const LOG_SSE_RECONNECTS = String(process.env.LOG_SSE_RECONNECTS ?? 'true').toLowerCase() === 'true';
 
 /**
  * Notify clients and invalidate cache when contacts changed.
@@ -51,20 +52,31 @@ function startPolling(baseUrl, onContactsChanged, io) {
 /**
  * Subscribe to Swift daemon: try GET /events SSE first; on 5xx/stream error fall back to polling GET /contacts/changed.
  * On contacts_updated, calls onContactsChanged() and optionally broadcasts via Socket.IO.
+ * On new_message, calls onNewMessage() with the decoded payload.
+ * Calls onSseConnected/onSseDisconnected for SSE lifecycle and onSseEvent for any event.
  * @param {Object} opts
  * @param {string} [opts.baseUrl] - Daemon base URL
  * @param {Function} [opts.onContactsChanged] - Called when contacts_updated is received
  * @param {Object} [opts.io] - Socket.IO server; if set, broadcasts 'contacts_updated' to all clients
+ * @param {Function} [opts.onNewMessage] - Called when new_message is received (payload object)
+ * @param {Function} [opts.onSseConnected] - Called when SSE stream is connected
+ * @param {Function} [opts.onSseDisconnected] - Called when SSE stream ends/errors
+ * @param {Function} [opts.onSseEvent] - Called on every SSE event (eventName, data)
  */
 export function subscribeToDaemonEvents(opts = {}) {
   const baseUrl = opts.baseUrl || DEFAULT_BASE_URL;
   const onContactsChanged = opts.onContactsChanged || (() => {});
+  const onNewMessage = opts.onNewMessage || (() => {});
+  const onSseConnected = opts.onSseConnected || (() => {});
+  const onSseDisconnected = opts.onSseDisconnected || (() => {});
+  const onSseEvent = opts.onSseEvent || (() => {});
   const io = opts.io;
 
   const eventsUrl = `${baseUrl.replace(/\/$/, '')}/events`;
   let pollTimer = null;
 
   function handleEvent(event, data) {
+    onSseEvent(event, data);
     if (event === 'contacts_updated') {
       let payload = { type: 'contacts_updated' };
       if (typeof data === 'string') {
@@ -75,10 +87,30 @@ export function subscribeToDaemonEvents(opts = {}) {
         payload = data;
       }
       emitContactsChanged(onContactsChanged, io, payload);
+      return;
+    }
+    if (event === 'new_message' || event === 'message.created') {
+      let payload = null;
+      if (typeof data === 'string') {
+        try {
+          payload = JSON.parse(data);
+        } catch (_) {
+          payload = null;
+        }
+      } else if (data && typeof data === 'object') {
+        payload = data;
+      }
+      if (payload) onNewMessage(payload);
     }
   }
 
+  let connectAttempts = 0;
+
   function connect() {
+    connectAttempts += 1;
+    if (LOG_SSE_RECONNECTS) {
+      logger.info(`Daemon SSE connecting (attempt ${connectAttempts}): ${eventsUrl}`);
+    }
     fetch(eventsUrl, { method: 'GET' })
       .then((res) => {
         if (!res.ok) {
@@ -90,14 +122,20 @@ export function subscribeToDaemonEvents(opts = {}) {
         if (!body) {
           throw new Error('No response body');
         }
+        onSseConnected({ attempt: connectAttempts, url: eventsUrl });
         return readSSE(body, handleEvent);
       })
       .then(() => {
         logger.debug('Daemon events stream ended; reconnecting');
+        onSseDisconnected({ reason: 'stream-ended', url: eventsUrl, reconnectInMs: RECONNECT_MS });
+        if (LOG_SSE_RECONNECTS) {
+          logger.warn(`Daemon SSE stream ended; reconnecting in ${RECONNECT_MS}ms`);
+        }
         setTimeout(connect, RECONNECT_MS);
       })
       .catch((err) => {
         const msg = err?.message || '';
+        onSseDisconnected({ reason: 'error', error: err, url: eventsUrl, reconnectInMs: RECONNECT_MS });
         if (msg.includes('404') || msg.includes('501')) {
           logger.debug('Daemon /events not available; address book sync will use cache TTL');
           return;
@@ -108,6 +146,9 @@ export function subscribeToDaemonEvents(opts = {}) {
           return;
         }
         logger.warn(`Daemon events connection failed: ${msg}; reconnecting in ${RECONNECT_MS}ms`);
+        if (LOG_SSE_RECONNECTS) {
+          logger.warn(`Daemon SSE reconnect scheduled in ${RECONNECT_MS}ms`);
+        }
         setTimeout(connect, RECONNECT_MS);
       });
   }

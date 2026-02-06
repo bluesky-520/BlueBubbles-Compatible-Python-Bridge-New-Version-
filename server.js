@@ -117,6 +117,28 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: Date.now() });
 });
 
+app.get('/health/sse', (req, res) => {
+  res.json({
+    status: 'ok',
+    sseHealthy,
+    lastSseEventAt,
+    lastSseEventName,
+    lastSseConnectAt,
+    lastSseDisconnectAt,
+    sseConnectCount,
+    sseDisconnectCount,
+    sseReconnectAttempts,
+    lastSseError,
+    lastSseErrorAt,
+    polling: Boolean(pollTimer),
+    pollIntervalMs: POLL_INTERVAL_MS,
+    sseIdleTimeoutMs: SSE_IDLE_TIMEOUT_MS,
+    sseWatchdogIntervalMs: SSE_WATCHDOG_INTERVAL_MS,
+    daemonBaseUrl,
+    daemonSseUrl
+  });
+});
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({
@@ -137,9 +159,110 @@ app.use((err, req, res, next) => {
 // Initialize Socket.IO
 const socketManager = new SocketManager(io);
 
-// Subscribe to Swift daemon SSE for address book sync (contacts_updated)
+// Dedupe: skip re-emitting the same message (belt-and-suspenders for edge cases)
+const recentlyEmittedGuids = new Set();
+const MAX_EMITTED_CACHE = 1000;
+
+function shouldEmitMessage(guid) {
+  if (!guid) return true;
+  if (recentlyEmittedGuids.has(guid)) return false;
+  recentlyEmittedGuids.add(guid);
+  if (recentlyEmittedGuids.size > MAX_EMITTED_CACHE) {
+    recentlyEmittedGuids.clear();
+  }
+  return true;
+}
+
+const POLL_INTERVAL_MS = (() => {
+  const raw = process.env.POLL_INTERVAL_MS;
+  const n = raw != null ? parseInt(String(raw), 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 1000;
+})();
+const SSE_IDLE_TIMEOUT_MS = (() => {
+  const raw = process.env.SSE_IDLE_TIMEOUT_MS;
+  const n = raw != null ? parseInt(String(raw), 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 5000;
+})();
+const SSE_WATCHDOG_INTERVAL_MS = (() => {
+  const raw = process.env.SSE_WATCHDOG_INTERVAL_MS;
+  const n = raw != null ? parseInt(String(raw), 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 1000;
+})();
+const LOG_SSE_HEALTH = String(process.env.LOG_SSE_HEALTH ?? 'true').toLowerCase() === 'true';
+
+let pollTimer = null;
+let sseHealthy = false;
+let lastSseEventAt = 0;
+let lastSseEventName = null;
+let sseConnectCount = 0;
+let sseDisconnectCount = 0;
+let sseReconnectAttempts = 0;
+let lastSseConnectAt = 0;
+let lastSseDisconnectAt = 0;
+let lastSseError = null;
+let lastSseErrorAt = 0;
+const daemonBaseUrl = process.env.SWIFT_DAEMON_URL || 'http://localhost:8081';
+const daemonSseUrl = `${daemonBaseUrl.replace(/\/$/, '')}/events`;
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(pollSwiftDaemon, POLL_INTERVAL_MS);
+  if (LOG_SSE_HEALTH) logger.info(`Polling enabled (interval=${POLL_INTERVAL_MS}ms)`);
+}
+
+function stopPolling() {
+  if (!pollTimer) return;
+  clearInterval(pollTimer);
+  pollTimer = null;
+  if (LOG_SSE_HEALTH) logger.info('Polling disabled (SSE healthy)');
+}
+
+function setSseHealthy(healthy) {
+  if (sseHealthy === healthy) return;
+  sseHealthy = healthy;
+  if (healthy) {
+    if (LOG_SSE_HEALTH) logger.info('SSE connected; marking healthy');
+    stopPolling();
+  } else {
+    if (LOG_SSE_HEALTH) logger.warn('SSE disconnected/unhealthy; enabling polling');
+    startPolling();
+  }
+}
+
+// Subscribe to Swift daemon SSE for address book sync (contacts_updated) and messages
 subscribeToDaemonEvents({
   onContactsChanged: invalidateContactsCache,
+  onNewMessage: (msgData) => {
+    const chatGuid = msgData?.chatGuid || null;
+    if (!chatGuid) return;
+    const guid = msgData?.guid || null;
+    if (!shouldEmitMessage(guid)) return;
+    const messagePayload = toMessageResponse(msgData, chatGuid);
+    socketManager.broadcastToChat(chatGuid, 'message.created', messagePayload);
+    socketManager.broadcastToChat(chatGuid, 'new-message', messagePayload);
+    logger.info(`Emitted SSE message to room ${chatGuid}: ${guid || '(no guid)'}`);
+  },
+  onSseConnected: (info) => {
+    sseConnectCount += 1;
+    lastSseConnectAt = Date.now();
+    if (LOG_SSE_HEALTH) logger.info(`SSE connected (attempt ${info?.attempt ?? sseConnectCount})`);
+    setSseHealthy(true);
+  },
+  onSseDisconnected: (info) => {
+    sseDisconnectCount += 1;
+    lastSseDisconnectAt = Date.now();
+    sseReconnectAttempts += 1;
+    if (info?.error?.message) {
+      lastSseError = info.error.message;
+      lastSseErrorAt = Date.now();
+    }
+    if (LOG_SSE_HEALTH) logger.warn(`SSE disconnected (${info?.reason || 'unknown'})`);
+    setSseHealthy(false);
+  },
+  onSseEvent: (eventName) => {
+    lastSseEventAt = Date.now();
+    lastSseEventName = eventName || null;
+  },
   io
 });
 
@@ -187,10 +310,6 @@ io.on('connection', (socket) => {
 // Keep lastCheckTime in Unix ms to avoid JS precision loss (Apple ns exceeds MAX_SAFE_INTEGER)
 let lastCheckTime = Date.now();
 
-// Dedupe: skip re-emitting the same message (belt-and-suspenders for edge cases)
-const recentlyEmittedGuids = new Set();
-const MAX_EMITTED_CACHE = 1000;
-
 const pollSwiftDaemon = async () => {
   try {
     const updates = await swiftDaemon.getUpdates(lastCheckTime);
@@ -202,12 +321,8 @@ const pollSwiftDaemon = async () => {
       const chatGuid = msgData.chatGuid;
       if (!chatGuid) continue;
 
-      // Skip if we already emitted this message (prevents duplicate emissions)
-      if (recentlyEmittedGuids.has(msgData.guid)) continue;
-      recentlyEmittedGuids.add(msgData.guid);
-      if (recentlyEmittedGuids.size > MAX_EMITTED_CACHE) {
-        recentlyEmittedGuids.clear();
-      }
+      const guid = msgData?.guid || null;
+      if (!shouldEmitMessage(guid)) continue;
 
       const messagePayload = toMessageResponse(msgData, chatGuid);
 
@@ -250,8 +365,17 @@ const pollSwiftDaemon = async () => {
   }
 };
 
-// Start polling every 1 second
-setInterval(pollSwiftDaemon, 1000);
+// Start polling immediately until SSE is healthy
+startPolling();
+
+// Watchdog: if SSE goes quiet, resume polling
+setInterval(() => {
+  if (!sseHealthy) return;
+  if (Date.now() - lastSseEventAt > SSE_IDLE_TIMEOUT_MS) {
+    if (LOG_SSE_HEALTH) logger.warn(`SSE idle > ${SSE_IDLE_TIMEOUT_MS}ms; marking unhealthy`);
+    setSseHealthy(false);
+  }
+}, SSE_WATCHDOG_INTERVAL_MS);
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
